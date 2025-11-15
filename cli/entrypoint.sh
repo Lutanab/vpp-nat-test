@@ -14,6 +14,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Подключаем вспомогательные функции
 source "${SCRIPT_DIR}/shell_helpers/vpp_helpers.sh"
+source "${SCRIPT_DIR}/prepare_network.sh"
 
 # Функция для вывода справки
 show_help() {
@@ -23,11 +24,13 @@ show_help() {
 Команды:
     prepare          Подготовка окружения (установка зависимостей, QEMU, отключение libvirt)
     bootstrap        Настройка VPP (запуск сервиса, создание veth-пары)
+    prepare-network  Подготовка сетевой топологии (bridge, tap-интерфейсы, NAT)
     help             Показать эту справку
 
 Примеры:
     $0 prepare
     $0 bootstrap
+    $0 prepare-network
     $0 help
 EOF
 }
@@ -126,6 +129,12 @@ cmd_bootstrap() {
     # echo ""
 }
 
+# Команда prepare-network
+cmd_prepare_network() {
+    # Вызываем prepare_network_main функцию из prepare_network.sh
+    prepare_network_main
+}
+
 # Главная логика
 main() {
     # Проверяем наличие команды
@@ -145,6 +154,9 @@ main() {
             ;;
         bootstrap)
             cmd_bootstrap "$@"
+            ;;
+        prepare-network)
+            cmd_prepare_network "$@"
             ;;
         help|--help|-h)
             show_help

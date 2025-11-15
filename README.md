@@ -10,6 +10,7 @@
 
 - `prepare` - Подготовка окружения (установка зависимостей VPP, QEMU, отключение libvirt)
 - `bootstrap` - Настройка VPP (запуск сервиса, создание veth-пары)
+- `prepare-network` - Подготовка сетевой топологии (bridge br0, tap-интерфейсы, NAT)
 - `help` - Показать справку
 
 ### Примеры использования:
@@ -20,6 +21,9 @@ sudo ./cli.sh prepare
 
 # Настройка VPP
 sudo ./cli.sh bootstrap
+
+# Подготовка сетевой топологии
+sudo ./cli.sh prepare-network
 
 # Справка
 ./cli.sh help
