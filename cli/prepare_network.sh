@@ -1,23 +1,5 @@
 #!/bin/bash
 
-set -e
-
-# Константы для физического интерфейса eth0
-ETH0_INTERFACE="enp2s0"
-ETH0_IP="198.162.0.10"
-ETH0_NETMASK="255.255.255.0"
-ETH0_CIDR="24"
-ETH0_GATEWAY="198.162.0.1"
-
-# Константы для bridge интерфейса br0
-BR0_INTERFACE="br0"
-BR0_IP="10.8.0.1"
-BR0_NETMASK="255.255.255.0"
-BR0_CIDR="24"
-
-# Константы для tap-интерфейсов
-TAP_INTERFACES=("tap0" "tap1" "tap2")
-
 # Функция для идемпотентного создания bridge и назначения IP
 create_br0_bridge() {
     local bridge_name="$1"
@@ -95,8 +77,8 @@ create_tap_interface() {
     
     # Проверяем, существует ли tap-интерфейс
     if ip link show "$tap_name" &>/dev/null; then
-        # Проверяем, что это действительно tap-интерфейс
-        if [ ! -d "/sys/class/net/$tap_name/tun_flags" ]; then
+        # Проверяем, что это действительно tap-интерфейс (tun_flags - это файл, а не директория)
+        if [ ! -f "/sys/class/net/$tap_name/tun_flags" ]; then
             echo "  Интерфейс $tap_name существует, но не является tap. Удаление..."
             sudo ip link set "$tap_name" down 2>/dev/null || true
             sudo ip link delete "$tap_name" 2>/dev/null || true
@@ -279,10 +261,8 @@ prepare_network_main() {
     echo "=========================================="
 }
 
-# Функция prepare_network_main экспортируется для использования в других скриптах
-# Если скрипт запущен напрямую, вызываем prepare_network_main
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+prepare_network_cli() {
+    ensure_vpp_service
     prepare_network_main
-fi
-
+}
 

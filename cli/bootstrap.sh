@@ -5,21 +5,35 @@ set -e
 # Подключаем вспомогательные функции
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/shell_helpers/vpp_helpers.sh"
+source "${SCRIPT_DIR}prepare_network.sh"
 
-ensure_vpp_service
-create_veth_pair_and_connect_to_vpp
+# Функция для проверки и создания всех vhost-user сокетов
+setup_vhost_sockets() {
+    echo "=== Проверка и создание vhost-user сокетов ==="
+    
+    # Проверяем, что VPP запущен
+    if ! vppctl show version &> /dev/null; then
+        echo "  ✗ Ошибка: VPP не запущен или недоступен"
+        exit 1
+    fi
+    
+    # Создаем каждый vhost-user сокет
+    for socket_path in "${VHOST_SOCKETS[@]}"; do
+        check_and_create_vhost_socket "$socket_path"
+        echo ""
+    done
+    
+    echo "  ✓ Все vhost-user сокеты готовы"
+    echo ""
+}
 
-#echo "=== Проверка и создание vhost-user сокетов ==="
-#VHOST_SOCKETS=(
-#    "/var/run/vpp/vhost1.sock"
-#    "/var/run/vpp/vhost2.sock"
-#)
-#for socket in "${VHOST_SOCKETS[@]}"; do
-#    check_and_create_vhost_socket "$socket"
-#    echo ""
-#done
-#echo "=== Все vhost-user сокеты готовы ==="
-#echo ""
+# Основная функция bootstrap
+bootstrap_main() {
+    setup_vpp_service
+    create_veth_pair_and_connect_to_vpp
+    prepare_network_main
+    setup_vhost_sockets
+}
 
 # Пример использования (закомментирован, так как это будет частью другой функции)
 # qemu-system-x86_64 \

@@ -1,7 +1,37 @@
 #!/bin/bash
 
-# Функция для проверки и управления сервисом VPP
+# Функция для проверки, что VPP запущен и доступен (без перезапуска)
 ensure_vpp_service() {
+    local service_name="vpp"
+    
+    # Проверяем существование сервиса
+    if ! systemctl list-unit-files --type=service | grep -qE "^${service_name}\.service"; then
+        echo "Ошибка: Сервис ${service_name}.service не найден."
+        echo "Убедитесь, что VPP установлен и сервис настроен."
+        exit 1
+    fi
+    
+    # Проверяем, что сервис активен
+    if ! systemctl is-active --quiet "${service_name}.service"; then
+        echo "Ошибка: Сервис VPP не запущен."
+        echo "Запустите VPP перед выполнением команды."
+        exit 1
+    fi
+    
+    # Проверяем доступность VPP через vppctl
+    if ! command -v vppctl &> /dev/null; then
+        echo "Ошибка: vppctl не найден. Убедитесь, что VPP установлен и доступен в PATH."
+        exit 1
+    fi
+    
+    if ! vppctl show version &> /dev/null; then
+        echo "Ошибка: VPP не доступен через vppctl."
+        exit 1
+    fi
+}
+
+# Функция для проверки и управления сервисом VPP
+setup_vpp_service() {
     local service_name="vpp"
     
     echo "=== Проверка сервиса VPP ==="
@@ -39,14 +69,9 @@ ensure_vpp_service() {
     # Ждем немного, чтобы сервис полностью запустился
     sleep 3
     
-    # Проверяем, что сервис действительно активен
-    if systemctl is-active --quiet "${service_name}.service"; then
-        echo "  ✓ Сервис VPP активен и готов к работе"
-    else
-        echo "  ✗ Сервис VPP не активен после запуска/перезапуска"
-        exit 1
-    fi
-    
+    # Используем ensure_vpp_service для финальной проверки
+    ensure_vpp_service
+    echo "  ✓ Сервис VPP активен и готов к работе"
     echo ""
 }
 
