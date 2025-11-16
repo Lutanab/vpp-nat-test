@@ -53,6 +53,8 @@ prepare_main() {
         "libvirt-clients"
         "bridge-utils"
         "virt-manager"
+        "cloud-image-utils"
+        "socat"
     )
 
     echo "Обновление списка пакетов..."

@@ -126,6 +126,14 @@ create_veth_pair_and_connect_to_vpp() {
         echo "  ✗ Ошибка при установке IP адреса"
         exit 1
     fi
+
+    echo "  Настройка маршрута по умолчанию через 10.8.0.1 для $vpp_host_if_name"
+    if vppctl ip route add 0.0.0.0/0 via 10.8.0.1 "$vpp_host_if_name" 2>&1; then
+        echo "  ✓ Маршрут по умолчанию добавлен"
+    else
+        echo "  ✗ Ошибка при добавлении маршрута по умолчанию"
+        exit 1
+    fi
     
     echo "  ✓ Veth-пара создана и подключена к VPP (интерфейс в VPP настроен с IP 10.8.0.2/24, состояние DOWN)"
     echo ""

@@ -19,6 +19,8 @@ source "${SCRIPT_DIR}/constants.sh"
 source "${SCRIPT_DIR}/shell_helpers/vpp_helpers.sh"
 source "${SCRIPT_DIR}/prepare.sh"
 source "${SCRIPT_DIR}/setup_network.sh"
+source "${SCRIPT_DIR}/clean_network.sh"
+source "${SCRIPT_DIR}/virtual_machines.sh"
 
 # Функция для вывода справки
 show_help() {
@@ -27,13 +29,10 @@ show_help() {
 
 Команды:
     prepare          Подготовка окружения (установка зависимостей, QEMU, отключение libvirt)
-    setup-network  Подготовка сетевой топологии (bridge, tap-интерфейсы, NAT)
+    setup-network    Подготовка сетевой топологии (bridge, tap-интерфейсы, NAT)
+    setup-vms        Подготовка и запуск всех ВМ
+    clean_network    Очистка сетевой топологии и vhost сокетов
     help             Показать эту справку
-
-Примеры:
-    $0 prepare
-    $0 setup-network
-    $0 help
 EOF
 }
 
@@ -57,6 +56,12 @@ main() {
             ;;
         setup-network)
             setup_network_main "$@"
+            ;;
+        setup-vms)
+            configure_and_deploy_vms "$@"
+            ;;
+        clean-network)
+            clean_network_main "$@"
             ;;
         help|--help|-h)
             show_help

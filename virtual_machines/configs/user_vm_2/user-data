@@ -1,0 +1,27 @@
+#cloud-config
+hostname: user-vm-2
+fqdn: user-vm-2.local
+
+users:
+  - name: zero
+    gecos: Ubuntu User
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: [sudo]
+    lock_passwd: false
+    plain_text_passwd: "orez1234"
+
+ssh_pwauth: false
+disable_root: true
+
+network:
+  version: 2
+  ethernets:
+    ens3:
+      dhcp4: no
+      addresses:
+        - 10.8.1.3/24
+      gateway4: 10.10.1.1
+
+packages:
+  - htop
+

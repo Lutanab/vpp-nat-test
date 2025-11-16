@@ -102,13 +102,13 @@ create_tap_interface() {
     fi
 }
 
-# Функция для идемпотентного подключения tap-интерфейса к bridge
-connect_tap_to_bridge() {
-    local tap_name="$1"
+# Функция для идемпотентного подключения интерфейса к bridge
+connect_interface_to_bridge() {
+    local iface_name="$1"
     local bridge_name="$2"
     
-    if [ -z "$tap_name" ]; then
-        echo "  ✗ Ошибка: не указано имя tap-интерфейса"
+    if [ -z "$iface_name" ]; then
+        echo "  ✗ Ошибка: не указано имя интерфейса"
         exit 1
     fi
     
@@ -117,9 +117,9 @@ connect_tap_to_bridge() {
         exit 1
     fi
     
-    # Проверяем, что tap-интерфейс существует
-    if ! ip link show "$tap_name" &>/dev/null; then
-        echo "  ✗ Ошибка: tap-интерфейс $tap_name не существует"
+    # Проверяем, что интерфейс существует
+    if ! ip link show "$iface_name" &>/dev/null; then
+        echo "  ✗ Ошибка: интерфейс $iface_name не существует"
         exit 1
     fi
     
@@ -129,26 +129,26 @@ connect_tap_to_bridge() {
         exit 1
     fi
     
-    # Проверяем, подключен ли tap к bridge
-    local master=$(ip link show "$tap_name" 2>/dev/null | grep -oP 'master \K\w+' || echo "")
+    # Проверяем, подключен ли интерфейс к bridge
+    local master=$(ip link show "$iface_name" 2>/dev/null | grep -oP 'master \K\w+' || echo "")
     
     if [ -z "$master" ] || [ "$master" != "$bridge_name" ]; then
-        echo "  Подключение $tap_name к bridge $bridge_name..."
+        echo "  Подключение $iface_name к bridge $bridge_name..."
         
         # Отключаем от другого bridge, если подключен
         if [ -n "$master" ] && [ "$master" != "$bridge_name" ]; then
-            sudo ip link set "$tap_name" nomaster 2>/dev/null || true
+            sudo ip link set "$iface_name" nomaster 2>/dev/null || true
         fi
         
         # Подключаем к нужному bridge
-        if sudo ip link set "$tap_name" master "$bridge_name"; then
-            echo "  ✓ Tap-интерфейс $tap_name подключен к bridge $bridge_name"
+        if sudo ip link set "$iface_name" master "$bridge_name"; then
+            echo "  ✓ Интерфейс $iface_name подключен к bridge $bridge_name"
         else
-            echo "  ✗ Ошибка при подключении $tap_name к bridge $bridge_name"
+            echo "  ✗ Ошибка при подключении $iface_name к bridge $bridge_name"
             exit 1
         fi
     else
-        echo "  ✓ Tap-интерфейс $tap_name уже подключен к bridge $bridge_name"
+        echo "  ✓ Интерфейс $iface_name уже подключен к bridge $bridge_name"
     fi
 }
 
@@ -260,8 +260,13 @@ prepare_host_network() {
     # Подключение tap-интерфейсов к bridge
     echo "=== Подключение tap-интерфейсов к bridge $BR0_INTERFACE ==="
     for tap_name in "${TAP_INTERFACES[@]}"; do
-        connect_tap_to_bridge "$tap_name" "$BR0_INTERFACE"
+        connect_interface_to_bridge "$tap_name" "$BR0_INTERFACE"
     done
+    echo ""
+    
+    # Подключение veth-интерфейса к bridge
+    echo "=== Подключение veth-интерфейса ${VETH_VPP_IF_NAME} к bridge $BR0_INTERFACE ==="
+    connect_interface_to_bridge "$VETH_VPP_IF_NAME" "$BR0_INTERFACE"
     echo ""
     
     # Настройка NAT
@@ -295,7 +300,6 @@ setup_network_main() {
     setup_vhost_sockets
     create_veth_pair_and_connect_to_vpp "$VETH_VPP_IF_NAME" "$VETH_HOST_IF_NAME" "$VETH_VPP_HOST_IF_NAME"
     prepare_host_network
-    #echo "${VHOST_USER_VPP_IFACES[@]}"
     prepare_vpp_network
     set_ifaces_up
 }
