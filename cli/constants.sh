@@ -21,3 +21,18 @@ export VHOST_SOCKETS=(
     "/var/run/vpp/vhost2.sock"
 )
 
+# Глобальная переменная для хранения имен vhost-user интерфейсов в VPP
+export VHOST_USER_VPP_IFACES=()
+
+# Константы для veth-пары
+export VETH_VPP_IF_NAME="vpp0"
+export VETH_HOST_IF_NAME="host0"
+# Имя veth интерфейса внутри VPP
+export VETH_VPP_HOST_IF_NAME="host-vpp0"
+
+# Константы для VPP bridge domain и BVI
+export VPP_BRIDGE_DOMAIN_ID="10"
+export VPP_BVI_INTERFACE=""
+export VPP_BVI_IP="10.8.1.1"
+export VPP_BVI_CIDR="24"
+

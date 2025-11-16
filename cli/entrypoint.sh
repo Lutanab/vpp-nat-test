@@ -18,8 +18,7 @@ source "${SCRIPT_DIR}/constants.sh"
 # Подключаем вспомогательные функции
 source "${SCRIPT_DIR}/shell_helpers/vpp_helpers.sh"
 source "${SCRIPT_DIR}/prepare.sh"
-source "${SCRIPT_DIR}/bootstrap.sh"
-source "${SCRIPT_DIR}/prepare_network.sh"
+source "${SCRIPT_DIR}/setup_network.sh"
 
 # Функция для вывода справки
 show_help() {
@@ -28,14 +27,12 @@ show_help() {
 
 Команды:
     prepare          Подготовка окружения (установка зависимостей, QEMU, отключение libvirt)
-    bootstrap        Настройка VPP (запуск сервиса, создание veth-пары)
-    prepare-network  Подготовка сетевой топологии (bridge, tap-интерфейсы, NAT)
+    setup-network  Подготовка сетевой топологии (bridge, tap-интерфейсы, NAT)
     help             Показать эту справку
 
 Примеры:
     $0 prepare
-    $0 bootstrap
-    $0 prepare-network
+    $0 setup-network
     $0 help
 EOF
 }
@@ -58,11 +55,8 @@ main() {
         prepare)
             prepare_main "$@"
             ;;
-        bootstrap)
-            bootstrap_main "$@"
-            ;;
-        prepare-network)
-            prepare_network_cli "$@"
+        setup-network)
+            setup_network_main "$@"
             ;;
         help|--help|-h)
             show_help

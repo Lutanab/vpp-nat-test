@@ -187,7 +187,7 @@ setup_nat() {
 }
 
 # Функция для поднятия интерфейсов в состояние UP
-set_ifaces_up() {
+set_host_ifaces_up() {
     if [ $# -eq 0 ]; then
         echo "  ✗ Ошибка: не указаны имена интерфейсов для поднятия"
         exit 1
@@ -224,10 +224,24 @@ set_ifaces_up() {
     echo ""
 }
 
-# Основная функция подготовки сети
-prepare_network_main() {
+# Функция для проверки и создания всех vhost-user сокетов
+setup_vhost_sockets() {
+    echo "=== Проверка и создание vhost-user сокетов ==="
+    
+    # Создаем каждый vhost-user сокет
+    for socket_path in "${VHOST_SOCKETS[@]}"; do
+        check_and_create_vhost_socket "$socket_path"
+        echo ""
+    done
+    
+    echo "  ✓ Все vhost-user сокеты готовы"
+    echo ""
+}
+
+# Функция подготовки сети хоста
+prepare_host_network() {
     echo "=========================================="
-    echo "Подготовка сетевой топологии"
+    echo "Подготовка сетевой топологии хоста"
     echo "=========================================="
     echo ""
     
@@ -250,19 +264,39 @@ prepare_network_main() {
     done
     echo ""
     
-    # Поднятие всех интерфейсов
-    set_ifaces_up "$BR0_INTERFACE" "${TAP_INTERFACES[@]}"
-    
     # Настройка NAT
     setup_nat "$ETH0_INTERFACE"
     
     echo "=========================================="
-    echo "✓ Подготовка сетевой топологии завершена"
+    echo "✓ Подготовка сетевой топологии хоста завершена"
     echo "=========================================="
 }
 
-prepare_network_cli() {
-    ensure_vpp_service
-    prepare_network_main
+set_ifaces_up() {
+    echo "=========================================="
+    echo "Финальное поднятие интерфейсов"
+    echo "=========================================="
+    echo ""
+
+    # Поднимаем хостовые интерфейсы
+    set_host_ifaces_up "$BR0_INTERFACE" "$VETH_VPP_IF_NAME" "$VETH_HOST_IF_NAME" "${TAP_INTERFACES[@]}"
+
+    # Поднимаем интерфейсы внутри VPP
+    local vpp_ifaces=()
+    vpp_ifaces+=("$VETH_VPP_HOST_IF_NAME")
+    vpp_ifaces+=("$VPP_BVI_INTERFACE")
+    vpp_ifaces+=("${VHOST_USER_VPP_IFACES[@]}")
+
+    set_vpp_ifaces_up "${vpp_ifaces[@]}"
+}
+
+setup_network_main() {
+    setup_vpp_service
+    setup_vhost_sockets
+    create_veth_pair_and_connect_to_vpp "$VETH_VPP_IF_NAME" "$VETH_HOST_IF_NAME" "$VETH_VPP_HOST_IF_NAME"
+    prepare_host_network
+    #echo "${VHOST_USER_VPP_IFACES[@]}"
+    prepare_vpp_network
+    set_ifaces_up
 }
 

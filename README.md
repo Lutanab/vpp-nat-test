@@ -3,37 +3,33 @@
 Проект использует единый CLI скрипт для управления всеми операциями:
 
 ```bash
-./cli.sh <команда>
+./manage <команда>
 ```
 
 ### Доступные команды:
 
 - `prepare` - Подготовка окружения (установка зависимостей VPP, QEMU, отключение libvirt)
-- `bootstrap` - Настройка VPP (запуск сервиса, создание veth-пары)
-- `prepare-network` - Подготовка сетевой топологии (bridge br0, tap-интерфейсы, NAT)
+- `setup-network` - Подготовка сетевой топологии (bridge br0, tap-интерфейсы, NAT)
 - `help` - Показать справку
 
 ### Примеры использования:
 
 ```bash
 # Подготовка окружения
-sudo ./cli.sh prepare
-
-# Настройка VPP
-sudo ./cli.sh bootstrap
+sudo ./manage prepare
 
 # Подготовка сетевой топологии
-sudo ./cli.sh prepare-network
+sudo ./manage setup-network
 
 # Справка
-./cli.sh help
+./manage help
 ```
 
 ## Базовая установка vpp
 
 Перед тем как собирать:
 ```bash
-sudo ./cli.sh prepare
+sudo ./manage prepare
 ```
 
 Очередной раз собрать:

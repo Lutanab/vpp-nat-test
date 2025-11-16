@@ -77,13 +77,20 @@ setup_vpp_service() {
 
 # Функция для создания veth-пары и подключения её к VPP
 create_veth_pair_and_connect_to_vpp() {
-    local vpp_if_name="${1:-vpp0}"
-    local host_if_name="${2:-host0}"
-    local vpp_host_if_name="host-${vpp_if_name}"
+    local vpp_if_name="$1"
+    local host_if_name="$2"
+    local vpp_host_if_name="$3"
+    
+    if [ -z "$vpp_if_name" ] || [ -z "$host_if_name" ] || [ -z "$vpp_host_if_name" ]; then
+        echo "  ✗ Ошибка: не указаны все необходимые имена интерфейсов"
+        echo "  Использование: create_veth_pair_and_connect_to_vpp <vpp_if_name> <host_if_name> <vpp_host_if_name>"
+        exit 1
+    fi
     
     echo "=== Создание veth-пары и подключение к VPP ==="
     echo "  VPP интерфейс: $vpp_if_name"
     echo "  Host интерфейс: $host_if_name"
+    echo "  VPP host-interface: $vpp_host_if_name"
 
     # Удаляем существующую veth-пару, если она есть
     if ip link show "$vpp_if_name" &>/dev/null || ip link show "$host_if_name" &>/dev/null; then
@@ -95,25 +102,9 @@ create_veth_pair_and_connect_to_vpp() {
     # Создаем новую veth-пару
     echo "  Создание veth-пары: $vpp_if_name <-> $host_if_name"
     if sudo ip link add "$vpp_if_name" type veth peer name "$host_if_name"; then
-        echo "  ✓ Veth-пара создана"
+        echo "  ✓ Veth-пара создана (интерфейсы в состоянии DOWN)"
     else
         echo "  ✗ Ошибка при создании veth-пары"
-        exit 1
-    fi
-    
-    # Поднимаем оба интерфейса
-    echo "  Поднятие интерфейсов..."
-    if sudo ip link set "$host_if_name" up; then
-        echo "  ✓ Интерфейс $host_if_name поднят"
-    else
-        echo "  ✗ Ошибка при поднятии интерфейса $host_if_name"
-        exit 1
-    fi
-    
-    if sudo ip link set "$vpp_if_name" up; then
-        echo "  ✓ Интерфейс $vpp_if_name поднят"
-    else
-        echo "  ✗ Ошибка при поднятии интерфейса $vpp_if_name"
         exit 1
     fi
     
@@ -127,24 +118,16 @@ create_veth_pair_and_connect_to_vpp() {
         exit 1
     fi
     
-    # Поднимаем интерфейс в VPP
-    echo "  Поднятие интерфейса в VPP: $vpp_host_if_name"
-    if vppctl set int state "$vpp_host_if_name" up 2>&1; then
-        # Проверяем, что интерфейс действительно поднят
-        sleep 1
-        local updated_interfaces=$(vppctl show interface 2>/dev/null || echo "")
-        if echo "$updated_interfaces" | grep -qE "^${vpp_host_if_name}\s.*up"; then
-            echo "  ✓ Интерфейс $vpp_host_if_name поднят в VPP"
-        else
-            echo "  ✗ Интерфейс $vpp_host_if_name не поднят в VPP после команды"
-            exit 1
-        fi
+    # Устанавливаем IP адрес на интерфейс внутри VPP
+    echo "  Установка IP адреса 10.8.0.2/24 на интерфейс $vpp_host_if_name"
+    if vppctl set interface ip address "$vpp_host_if_name" 10.8.0.2/24 2>&1; then
+        echo "  ✓ IP адрес установлен"
     else
-        echo "  ✗ Ошибка при выполнении команды поднятия интерфейса $vpp_host_if_name"
+        echo "  ✗ Ошибка при установке IP адреса"
         exit 1
     fi
     
-    echo "  ✓ Veth-пара настроена и подключена к VPP"
+    echo "  ✓ Veth-пара создана и подключена к VPP (интерфейс в VPP настроен с IP 10.8.0.2/24, состояние DOWN)"
     echo ""
 }
 
@@ -193,18 +176,6 @@ check_and_create_vhost_socket() {
     
     echo "Проверка vhost-user сокета: $socket_path"
     
-    # Проверяем, что VPP запущен и доступен
-    if ! command -v vppctl &> /dev/null; then
-        echo "Ошибка: vppctl не найден. Убедитесь, что VPP установлен и доступен в PATH."
-        exit 1
-    fi
-    
-    # Проверяем доступность VPP через vppctl
-    if ! vppctl show version &> /dev/null; then
-        echo "Ошибка: VPP не запущен или недоступен. Запустите VPP перед выполнением скрипта."
-        exit 1
-    fi
-    
     # Проверяем, существует ли сокет в файловой системе
     local socket_exists=false
     if [ -S "$socket_path" ]; then
@@ -242,7 +213,9 @@ check_and_create_vhost_socket() {
         # Создаем vhost-user интерфейс через vppctl (VPP создаст сокет в режиме server)
         local output
         if output=$(vppctl create vhost-user socket "$socket_path" server 2>&1); then
+            output=${output//$'\r'/}
             echo "  ✓ Vhost-user интерфейс создан: $output"
+            VHOST_USER_VPP_IFACES+=("$output")
             
             # Устанавливаем права на сокет для доступа QEMU
             if [ -S "$socket_path" ]; then
@@ -256,5 +229,119 @@ check_and_create_vhost_socket() {
     else
         echo "  ✓ Vhost-user сокет $socket_path уже настроен"
     fi
+}
+
+# Функция для поднятия интерфейсов внутри VPP
+set_vpp_ifaces_up() {
+    if [ $# -eq 0 ]; then
+        echo "  ✗ Ошибка: не указаны VPP интерфейсы для поднятия"
+        exit 1
+    fi
+
+    echo "=== Поднятие VPP интерфейсов в состояние UP ==="
+
+    ensure_vpp_service
+
+    for vpp_iface in "$@"; do
+        if [ -z "$vpp_iface" ]; then
+            continue
+        fi
+
+        local iface_info
+        if ! iface_info=$(vppctl show interface "$vpp_iface" 2>&1); then
+            echo "  ✗ Ошибка: интерфейс $vpp_iface не найден в VPP"
+            echo "    $iface_info"
+            exit 1
+        fi
+
+        if echo "$iface_info" | grep -q "state up"; then
+            echo "  ✓ Интерфейс $vpp_iface уже поднят"
+            continue
+        fi
+
+        echo "  Поднятие интерфейса $vpp_iface..."
+        if vppctl set interface state "$vpp_iface" up 2>&1; then
+            echo "  ✓ Интерфейс $vpp_iface поднят"
+        else
+            echo "  ✗ Ошибка при поднятии интерфейса $vpp_iface"
+            exit 1
+        fi
+    done
+
+    echo "  ✓ Все указанные VPP интерфейсы подняты"
+    echo ""
+}
+
+# Функция для подготовки VPP bridge сети
+prepare_vpp_network() {
+    echo "=== Подготовка VPP bridge сети ==="
+
+    # Создаем bridge-domain
+    echo "  Создание bridge-domain $VPP_BRIDGE_DOMAIN_ID"
+    local bd_output
+    if bd_output=$(vppctl create bridge-domain "$VPP_BRIDGE_DOMAIN_ID" 2>&1); then
+        bd_output=${bd_output//$'\r'/}
+        echo "  ✓ Bridge-domain $VPP_BRIDGE_DOMAIN_ID создан"
+    else
+        echo "  ✗ Ошибка при создании bridge-domain: $bd_output"
+        exit 1
+    fi
+
+    # Присоединяем все vhost-user интерфейсы к bridge-domain
+    if [ ${#VHOST_USER_VPP_IFACES[@]} -eq 0 ]; then
+        echo "  ⚠ Нет vhost-user интерфейсов для присоединения к bridge-domain"
+    else
+        echo "  Присоединение vhost-user интерфейсов к bridge-domain $VPP_BRIDGE_DOMAIN_ID"
+        for vhost_if in "${VHOST_USER_VPP_IFACES[@]}"; do
+            if [ -z "$vhost_if" ]; then
+                continue
+            fi
+            echo "    Присоединение $vhost_if к bridge-domain..."
+            if vppctl set interface l2 bridge "$vhost_if" "$VPP_BRIDGE_DOMAIN_ID" 2>&1; then
+                echo "    ✓ Интерфейс $vhost_if присоединен"
+            else
+                echo "    ✗ Ошибка при присоединении интерфейса $vhost_if к bridge-domain"
+                exit 1
+            fi
+        done
+    fi
+    
+    # Создаем loopback интерфейс для BVI
+    echo "  Создание loopback интерфейса для BVI"
+    local loop_output
+    if loop_output=$(vppctl create loopback interface 2>&1); then
+        loop_output=${loop_output//$'\r'/}
+        VPP_BVI_INTERFACE=$(echo "$loop_output" | awk 'NF {iface=$NF} END {print iface}')
+        if [ -z "$VPP_BVI_INTERFACE" ]; then
+            echo "  ✗ Не удалось определить имя loopback интерфейса из вывода:"
+            echo "    $loop_output"
+            exit 1
+        fi
+        echo "  ✓ Loopback интерфейс создан: $VPP_BVI_INTERFACE"
+    else
+        echo "  ✗ Ошибка при создании loopback интерфейса: $loop_output"
+        exit 1
+    fi
+    
+    # Присоединяем loopback к bridge-domain как BVI
+    echo "  Присоединение $VPP_BVI_INTERFACE к bridge-domain $VPP_BRIDGE_DOMAIN_ID как BVI"
+    if vppctl set interface l2 bridge "$VPP_BVI_INTERFACE" "$VPP_BRIDGE_DOMAIN_ID" bvi 2>&1; then
+        echo "  ✓ Интерфейс $VPP_BVI_INTERFACE присоединен как BVI"
+    else
+        echo "  ✗ Ошибка при присоединении BVI к bridge-domain"
+        exit 1
+    fi
+    
+    # Устанавливаем IP адрес на BVI интерфейс
+    echo "  Установка IP адреса $VPP_BVI_IP/$VPP_BVI_CIDR на BVI интерфейс $VPP_BVI_INTERFACE"
+    if vppctl set interface ip address "$VPP_BVI_INTERFACE" "$VPP_BVI_IP/$VPP_BVI_CIDR" 2>&1; then
+        echo "  ✓ IP адрес установлен"
+    else
+        echo "  ✗ Ошибка при установке IP адреса на BVI"
+        exit 1
+    fi
+    
+    echo "  ✓ VPP bridge сеть подготовлена (bridge-domain $VPP_BRIDGE_DOMAIN_ID, BVI $VPP_BVI_INTERFACE с IP $VPP_BVI_IP/$VPP_BVI_CIDR, состояние DOWN)"
+    echo ""
 }
 
