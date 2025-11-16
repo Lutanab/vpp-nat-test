@@ -265,8 +265,8 @@ prepare_host_network() {
     echo ""
     
     # Подключение veth-интерфейса к bridge
-    echo "=== Подключение veth-интерфейса ${VETH_VPP_IF_NAME} к bridge $BR0_INTERFACE ==="
-    connect_interface_to_bridge "$VETH_VPP_IF_NAME" "$BR0_INTERFACE"
+    echo "=== Подключение veth-интерфейса ${VETH_HOST_IN_IF_NAME} к bridge $BR0_INTERFACE ==="
+    connect_interface_to_bridge "$VETH_HOST_IN_IF_NAME" "$BR0_INTERFACE"
     echo ""
     
     # Настройка NAT
@@ -284,11 +284,11 @@ set_ifaces_up() {
     echo ""
 
     # Поднимаем хостовые интерфейсы
-    set_host_ifaces_up "$BR0_INTERFACE" "$VETH_VPP_IF_NAME" "$VETH_HOST_IF_NAME" "${TAP_INTERFACES[@]}"
+    set_host_ifaces_up "$BR0_INTERFACE" "${TAP_INTERFACES[@]}"
 
     # Поднимаем интерфейсы внутри VPP
     local vpp_ifaces=()
-    vpp_ifaces+=("$VETH_VPP_HOST_IF_NAME")
+    vpp_ifaces+=("$VETH_VPP_IF_NAME")
     vpp_ifaces+=("$VPP_BVI_INTERFACE")
     vpp_ifaces+=("${VHOST_USER_VPP_IFACES[@]}")
 
@@ -297,10 +297,10 @@ set_ifaces_up() {
 
 setup_network_main() {
     setup_vpp_service
-    setup_vhost_sockets
-    create_veth_pair_and_connect_to_vpp "$VETH_VPP_IF_NAME" "$VETH_HOST_IF_NAME" "$VETH_VPP_HOST_IF_NAME"
-    prepare_host_network
-    prepare_vpp_network
-    set_ifaces_up
+    # setup_vhost_sockets
+    create_veth_pair_and_connect_to_vpp "$VETH_HOST_IN_IF_NAME" "$VETH_HOST_OUT_IF_NAME"
+    #prepare_host_network
+    #prepare_vpp_network
+    #set_ifaces_up
 }
 

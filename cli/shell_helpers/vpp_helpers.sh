@@ -77,65 +77,88 @@ setup_vpp_service() {
 
 # Функция для создания veth-пары и подключения её к VPP
 create_veth_pair_and_connect_to_vpp() {
-    local vpp_if_name="$1"
-    local host_if_name="$2"
-    local vpp_host_if_name="$3"
+    local veth_in_if_name="$1"
+    local veth_out_if_name="$2"
     
-    if [ -z "$vpp_if_name" ] || [ -z "$host_if_name" ] || [ -z "$vpp_host_if_name" ]; then
+    if [ -z "$veth_in_if_name" ] || [ -z "$veth_out_if_name" ]; then
         echo "  ✗ Ошибка: не указаны все необходимые имена интерфейсов"
-        echo "  Использование: create_veth_pair_and_connect_to_vpp <vpp_if_name> <host_if_name> <vpp_host_if_name>"
+        echo "  Использование: create_veth_pair_and_connect_to_vpp <veth_in_if_name> <veth_out_if_name>"
         exit 1
     fi
     
     echo "=== Создание veth-пары и подключение к VPP ==="
-    echo "  VPP интерфейс: $vpp_if_name"
-    echo "  Host интерфейс: $host_if_name"
-    echo "  VPP host-interface: $vpp_host_if_name"
+    echo "  VPP интерфейс: $veth_in_if_name"
+    echo "  VPP-out интерфейс: $veth_out_if_name"
 
     # Удаляем существующую veth-пару, если она есть
-    if ip link show "$vpp_if_name" &>/dev/null || ip link show "$host_if_name" &>/dev/null; then
+    if ip link show "$veth_in_if_name" &>/dev/null || ip link show "$veth_out_if_name" &>/dev/null; then
         echo "  Удаление существующей veth-пары..."
-        sudo ip link delete "$vpp_if_name" 2>/dev/null || sudo ip link delete "$host_if_name" 2>/dev/null || true
+        sudo ip link delete "$veth_in_if_name" 2>/dev/null || sudo ip link delete "$veth_out_if_name" 2>/dev/null || true
         echo "  ✓ Старая veth-пара удалена"
     fi
     
     # Создаем новую veth-пару
-    echo "  Создание veth-пары: $vpp_if_name <-> $host_if_name"
-    if sudo ip link add "$vpp_if_name" type veth peer name "$host_if_name"; then
-        echo "  ✓ Veth-пара создана (интерфейсы в состоянии DOWN)"
+    echo "  Создание veth-пары: $veth_in_if_name <-> $veth_out_if_name"
+    if sudo ip link add "$veth_in_if_name" type veth peer name "$veth_out_if_name"; then
+        echo "  ✓ Veth-пара создана"
     else
         echo "  ✗ Ошибка при создании veth-пары"
         exit 1
     fi
     
+    echo "  Перевод интерфейсов $veth_in_if_name и $veth_out_if_name в состояние UP"
+    if sudo ip link set "$veth_in_if_name" up && sudo ip link set "$veth_out_if_name" up; then
+        echo "  ✓ Интерфейсы переведены в состояние UP"
+    else
+        echo "  ✗ Не удалось поднять интерфейсы $veth_in_if_name $veth_out_if_name"
+        exit 1
+    fi
+    
+    if sudo ip addr replace 10.8.0.1/24 dev "$veth_in_if_name"; then
+        echo "  ✓ IP адрес 10.8.0.1/24 назначен на $veth_in_if_name"
+    else
+        echo "  ✗ Ошибка при назначении IP адреса на $veth_in_if_name"
+        exit 1
+    fi
+    
     # Создаем host-interface в VPP
-    echo "  Создание host-interface в VPP: $vpp_host_if_name"
+    echo "  Создание host-interface в VPP"
     local output
-    if output=$(vppctl create host-interface name "$vpp_if_name" 2>&1); then
+    if output=$(vppctl create host-interface name "$veth_out_if_name" 2>&1); then
+        output=${output//$'\r'/}
+        VETH_VPP_IF_NAME=$output
         echo "  ✓ Host-interface создан: $output"
     else
         echo "  ✗ Ошибка при создании host-interface: $output"
         exit 1
     fi
     
+    echo "  Поднятие интерфейса $VETH_VPP_IF_NAME в VPP"
+    if vppctl set interface state "$VETH_VPP_IF_NAME" up 2>&1; then
+        echo "  ✓ Интерфейс $VETH_VPP_IF_NAME поднят"
+    else
+        echo "  ✗ Ошибка при поднятии интерфейса $VETH_VPP_IF_NAME в VPP"
+        exit 1
+    fi
+    
     # Устанавливаем IP адрес на интерфейс внутри VPP
-    echo "  Установка IP адреса 10.8.0.2/24 на интерфейс $vpp_host_if_name"
-    if vppctl set interface ip address "$vpp_host_if_name" 10.8.0.2/24 2>&1; then
+    echo "  Установка IP адреса 10.8.0.2/24 на интерфейс $VETH_VPP_IF_NAME"
+    if vppctl set interface ip address "$VETH_VPP_IF_NAME" 10.8.0.2/24 2>&1; then
         echo "  ✓ IP адрес установлен"
     else
         echo "  ✗ Ошибка при установке IP адреса"
         exit 1
     fi
-
-    echo "  Настройка маршрута по умолчанию через 10.8.0.1 для $vpp_host_if_name"
-    if vppctl ip route add 0.0.0.0/0 via 10.8.0.1 "$vpp_host_if_name" 2>&1; then
+    
+    echo "  Настройка маршрута по умолчанию через 10.8.0.1 для $VETH_VPP_IF_NAME"
+    if vppctl ip route add 0.0.0.0/0 via 10.8.0.1 "$VETH_VPP_IF_NAME" 2>&1; then
         echo "  ✓ Маршрут по умолчанию добавлен"
     else
         echo "  ✗ Ошибка при добавлении маршрута по умолчанию"
         exit 1
     fi
     
-    echo "  ✓ Veth-пара создана и подключена к VPP (интерфейс в VPP настроен с IP 10.8.0.2/24, состояние DOWN)"
+    echo "  ✓ Veth-пара готова: $veth_in_if_name (10.8.0.1/24, UP) ↔ $VETH_VPP_IF_NAME (10.8.0.2/24, UP)"
     echo ""
 }
 

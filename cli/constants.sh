@@ -44,10 +44,10 @@ export USER_MACHINES_SYSTEMD_UNIT_NAME=("vpp-user-machine1" "vpp-user-machine2")
 export VHOST_USER_VPP_IFACES=()
 
 # Константы для veth-пары
-export VETH_VPP_IF_NAME="vpp0"
-export VETH_HOST_IF_NAME="vpp0-out"
+export VETH_HOST_IN_IF_NAME="vpp0"
+export VETH_HOST_OUT_IF_NAME="vpp0-out"
 # Имя veth интерфейса внутри VPP
-export VETH_VPP_HOST_IF_NAME="host-vpp0"
+export VETH_VPP_IF_NAME=""
 
 # Константы для VPP bridge domain и BVI
 export VPP_BRIDGE_DOMAIN_ID="10"

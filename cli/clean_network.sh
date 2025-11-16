@@ -59,7 +59,7 @@ delete_prefixed_interfaces() {
             echo "    ✓ Интерфейс $iface удален"
         else
             echo "    ✗ Не удалось удалить интерфейс $iface"
-            exit 1
+            # exit 1
         fi
     done
 
