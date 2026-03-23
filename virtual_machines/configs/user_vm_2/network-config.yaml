@@ -4,6 +4,9 @@ ethernets:
     dhcp4: false
     addresses:
       - 10.8.1.3/24
+    routes:
+      - to: 10.8.0.0/24
+        via: 10.8.1.1
   ens4:
     dhcp4: true
     optional: true
