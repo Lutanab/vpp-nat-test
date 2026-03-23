@@ -28,10 +28,11 @@ show_help() {
 Использование: $0 <команда> [опции]
 
 Команды:
-    prepare          Подготовка окружения (установка зависимостей, QEMU, отключение libvirt)
+    prepare          Подготовка окружения (установка зависимостей, QEMU, настройка libvirt)
     setup-network    Подготовка сетевой топологии (bridge, tap-интерфейсы, NAT)
     setup-vms        Подготовка и запуск всех ВМ
-    clean_network    Очистка сетевой топологии и vhost сокетов
+    stop-vms         Остановка всех ВМ
+    clean-network    Очистка сетевой топологии и vhost сокетов
     help             Показать эту справку
 EOF
 }
@@ -59,6 +60,9 @@ main() {
             ;;
         setup-vms)
             configure_and_deploy_vms "$@"
+            ;;
+        stop-vms)
+            stop_vms "$@"
             ;;
         clean-network)
             clean_network_main "$@"

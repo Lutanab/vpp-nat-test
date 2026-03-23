@@ -1,0 +1,9 @@
+version: 2
+ethernets:
+  ens3:
+    dhcp4: false
+    addresses:
+      - 10.8.1.2/24
+  ens4:
+    dhcp4: true
+    optional: true

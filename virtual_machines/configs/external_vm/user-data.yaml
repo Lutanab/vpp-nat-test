@@ -12,16 +12,3 @@ users:
 
 ssh_pwauth: false
 disable_root: true
-
-network:
-  version: 2
-  ethernets:
-    ens3:
-      dhcp4: no
-      addresses:
-        - 10.8.0.2/24
-      gateway4: 10.8.0.1
-
-packages:
-  - htop
-

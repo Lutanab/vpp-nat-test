@@ -1,1 +1,2 @@
 virtual_machines/storage
+virtual_machines/configs/*/meta-data.yaml

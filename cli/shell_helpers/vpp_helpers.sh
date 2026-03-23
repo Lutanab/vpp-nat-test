@@ -75,128 +75,223 @@ setup_vpp_service() {
     echo ""
 }
 
-# Функция для создания veth-пары и подключения её к VPP
-create_veth_pair_and_connect_to_vpp() {
-    local veth_in_if_name="$1"
-    local veth_out_if_name="$2"
+# Функция для создания external vhost-user интерфейса для внешней VM
+create_external_vhost_interface() {
+    echo "=== Создание vhost-user интерфейса для внешней VM ==="
     
-    if [ -z "$veth_in_if_name" ] || [ -z "$veth_out_if_name" ]; then
-        echo "  ✗ Ошибка: не указаны все необходимые имена интерфейсов"
-        echo "  Использование: create_veth_pair_and_connect_to_vpp <veth_in_if_name> <veth_out_if_name>"
-        exit 1
+    local socket_path="$EXTERNAL_VHOST_SOCKET"
+    echo "  Создание vhost-user интерфейса: $socket_path"
+    
+    # Убеждаемся, что директория существует
+    local socket_dir=$(dirname "$socket_path")
+    if [ ! -d "$socket_dir" ]; then
+        echo "  Создание директории $socket_dir"
+        sudo mkdir -p "$socket_dir"
+        sudo chmod 755 "$socket_dir"
     fi
     
-    echo "=== Создание veth-пары и подключение к VPP ==="
-    echo "  VPP интерфейс: $veth_in_if_name"
-    echo "  VPP-out интерфейс: $veth_out_if_name"
-
-    # Удаляем существующую veth-пару, если она есть
-    if ip link show "$veth_in_if_name" &>/dev/null || ip link show "$veth_out_if_name" &>/dev/null; then
-        echo "  Удаление существующей veth-пары..."
-        sudo ip link delete "$veth_in_if_name" 2>/dev/null || sudo ip link delete "$veth_out_if_name" 2>/dev/null || true
-        echo "  ✓ Старая veth-пара удалена"
+    # Удаляем старый сокет, если он существует
+    if [ -S "$socket_path" ]; then
+        echo "  Удаление старого сокета $socket_path"
+        sudo rm -f "$socket_path"
     fi
     
-    # Создаем новую veth-пару
-    echo "  Создание veth-пары: $veth_in_if_name <-> $veth_out_if_name"
-    if sudo ip link add "$veth_in_if_name" type veth peer name "$veth_out_if_name"; then
-        echo "  ✓ Veth-пара создана"
-    else
-        echo "  ✗ Ошибка при создании veth-пары"
-        exit 1
-    fi
-    
-    echo "  Перевод интерфейсов $veth_in_if_name и $veth_out_if_name в состояние UP"
-    if sudo ip link set "$veth_in_if_name" up && sudo ip link set "$veth_out_if_name" up; then
-        echo "  ✓ Интерфейсы переведены в состояние UP"
-    else
-        echo "  ✗ Не удалось поднять интерфейсы $veth_in_if_name $veth_out_if_name"
-        exit 1
-    fi
-    
-    if sudo ip addr replace 10.8.0.1/24 dev "$veth_in_if_name"; then
-        echo "  ✓ IP адрес 10.8.0.1/24 назначен на $veth_in_if_name"
-    else
-        echo "  ✗ Ошибка при назначении IP адреса на $veth_in_if_name"
-        exit 1
-    fi
-    
-    # Создаем host-interface в VPP
-    echo "  Создание host-interface в VPP"
+    # Создаем vhost-user интерфейс через vppctl (VPP создаст сокет в режиме server)
     local output
-    if output=$(vppctl create host-interface name "$veth_out_if_name" 2>&1); then
+    if output=$(vppctl create vhost-user socket "$socket_path" server 2>&1); then
         output=${output//$'\r'/}
-        VETH_VPP_IF_NAME=$output
-        echo "  ✓ Host-interface создан: $output"
+        EXTERNAL_VHOST_VPP_IFACE="$output"
+        echo "  ✓ Vhost-user интерфейс создан: $output"
+        
+        # Устанавливаем права на сокет для доступа QEMU (ждём его создания)
+        sleep 1
+        if [ -S "$socket_path" ]; then
+            sudo chmod 666 "$socket_path"
+            echo "  ✓ Права на сокет установлены"
+        fi
     else
-        echo "  ✗ Ошибка при создании host-interface: $output"
+        echo "  ✗ Ошибка при создании vhost-user интерфейса: $output"
         exit 1
     fi
     
-    echo "  Поднятие интерфейса $VETH_VPP_IF_NAME в VPP"
-    if vppctl set interface state "$VETH_VPP_IF_NAME" up 2>&1; then
-        echo "  ✓ Интерфейс $VETH_VPP_IF_NAME поднят"
-    else
-        echo "  ✗ Ошибка при поднятии интерфейса $VETH_VPP_IF_NAME в VPP"
-        exit 1
-    fi
-    
-    # Устанавливаем IP адрес на интерфейс внутри VPP
-    echo "  Установка IP адреса 10.8.0.2/24 на интерфейс $VETH_VPP_IF_NAME"
-    if vppctl set interface ip address "$VETH_VPP_IF_NAME" 10.8.0.2/24 2>&1; then
+    # Устанавливаем IP адрес на интерфейс внутри VPP (сторона VPP в сети 10.8.0.0/24)
+    echo "  Установка IP адреса 10.8.0.1/24 на интерфейс $EXTERNAL_VHOST_VPP_IFACE"
+    if vppctl set interface ip address "$EXTERNAL_VHOST_VPP_IFACE" 10.8.0.1/24 2>&1; then
         echo "  ✓ IP адрес установлен"
     else
         echo "  ✗ Ошибка при установке IP адреса"
         exit 1
     fi
     
-    echo "  Настройка маршрута по умолчанию через 10.8.0.1 для $VETH_VPP_IF_NAME"
-    if vppctl ip route add 0.0.0.0/0 via 10.8.0.1 "$VETH_VPP_IF_NAME" 2>&1; then
-        echo "  ✓ Маршрут по умолчанию добавлен"
-    else
-        echo "  ✗ Ошибка при добавлении маршрута по умолчанию"
-        exit 1
-    fi
-    
-    echo "  ✓ Veth-пара готова: $veth_in_if_name (10.8.0.1/24, UP) ↔ $VETH_VPP_IF_NAME (10.8.0.2/24, UP)"
+    echo "  ✓ External vhost-интерфейс готов: $EXTERNAL_VHOST_VPP_IFACE (10.8.0.1/24, DOWN)"
+    echo "  ℹ External VM должна использовать IP 10.8.0.2/24 с gateway 10.8.0.1"
     echo ""
 }
 
-# Функция для отключения libvirt и удаления virbr0
-disable_libvirt_networking() {
-    echo "=== Отключение libvirt networking ==="
+# DEPRECATED: Функция для создания veth-пары (заменено на external vhost)
+# create_veth_pair_and_connect_to_vpp() {
+#     ... (закомментировано)
+# }
+
+# Функция для настройки libvirt сети default 10.8.2.0/24
+configure_libvirt_networking() {
+    echo "=== Настройка libvirt networking ==="
     
-    # Останавливаем libvirtd
-    if systemctl is-active --quiet libvirtd 2>/dev/null; then
-        echo "  Остановка libvirtd..."
-        sudo systemctl stop libvirtd
-        echo "  ✓ libvirtd остановлен"
+    # Проверяем и запускаем libvirtd если не запущен
+    if ! systemctl is-active --quiet libvirtd 2>/dev/null; then
+        echo "  Запуск libvirtd..."
+        sudo systemctl start libvirtd
+        echo "  ✓ libvirtd запущен"
+    else
+        echo "  ✓ libvirtd уже запущен"
     fi
     
-    # Отключаем автозапуск
-    if systemctl is-enabled --quiet libvirtd 2>/dev/null; then
-        echo "  Отключение автозапуска libvirtd..."
-        sudo systemctl disable libvirtd
-        echo "  ✓ Автозапуск libvirtd отключен"
-    fi
-    
-    # Удаляем сеть по умолчанию
+    # Проверяем существование сети default
     if sudo virsh net-list --all 2>/dev/null | grep -q "default"; then
-        echo "  Удаление сети default..."
+        echo "  Сеть default уже существует, удаляем её..."
         sudo virsh net-destroy default 2>/dev/null || true
         sudo virsh net-undefine default 2>/dev/null || true
-        echo "  ✓ Сеть default удалена"
+        echo "  ✓ Старая сеть default удалена"
     fi
     
-    # Удаляем virbr0 интерфейс
-    if ip link show virbr0 &>/dev/null; then
-        echo "  Удаление интерфейса virbr0..."
-        sudo ip link set virbr0 down 2>/dev/null || true
-        sudo ip link delete virbr0 2>/dev/null || true
-        echo "  ✓ Интерфейс virbr0 удален"
+    # Создаем XML конфигурацию для сети default с подсетью 10.8.2.0/24
+    local network_xml=$(cat <<EOF
+<network>
+  <name>default</name>
+  <forward mode='nat'>
+    <nat>
+      <port start='1024' end='65535'/>
+    </nat>
+  </forward>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <ip address='10.8.2.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='10.8.2.2' end='10.8.2.254'/>
+    </dhcp>
+  </ip>
+</network>
+EOF
+)
+    
+    # Создаем временный файл с конфигурацией
+    local temp_xml=$(mktemp)
+    echo "$network_xml" > "$temp_xml"
+    
+    # Определяем сеть в libvirt
+    echo "  Создание сети default (10.8.2.0/24)..."
+    if sudo virsh net-define "$temp_xml" 2>&1; then
+        echo "  ✓ Сеть default определена"
+    else
+        echo "  ✗ Ошибка при определении сети default"
+        rm -f "$temp_xml"
+        exit 1
     fi
     
-    echo "  ✓ Libvirt networking отключен"
+    # Удаляем временный файл
+    rm -f "$temp_xml"
+    
+    # Включаем автозапуск сети
+    echo "  Включение автозапуска сети default..."
+    if sudo virsh net-autostart default 2>&1; then
+        echo "  ✓ Автозапуск сети default включен"
+    else
+        echo "  ✗ Ошибка при включении автозапуска"
+        exit 1
+    fi
+    
+    # Запускаем сеть
+    echo "  Запуск сети default..."
+    if sudo virsh net-start default 2>&1; then
+        echo "  ✓ Сеть default запущена"
+    else
+        echo "  ✗ Ошибка при запуске сети default"
+        exit 1
+    fi
+    
+    # Проверяем статус сети
+    echo "  Проверка статуса сети..."
+    if sudo virsh net-info default 2>/dev/null; then
+        echo "  ✓ Сеть default настроена и активна (10.8.2.0/24, virbr0)"
+    fi
+    
+    # Настройка QEMU bridge helper для доступа к virbr0
+    echo "  Настройка QEMU bridge helper..."
+    local qemu_bridge_conf="/etc/qemu/bridge.conf"
+    
+    # Создаем директорию если не существует
+    if [ ! -d "/etc/qemu" ]; then
+        sudo mkdir -p /etc/qemu
+    fi
+    
+    # Создаем или обновляем bridge.conf
+    if ! grep -q "^allow virbr0" "$qemu_bridge_conf" 2>/dev/null; then
+        echo "allow virbr0" | sudo tee "$qemu_bridge_conf" > /dev/null
+        echo "  ✓ Создан $qemu_bridge_conf"
+    else
+        echo "  ✓ $qemu_bridge_conf уже настроен"
+    fi
+    
+    # Устанавливаем права на qemu-bridge-helper
+    local bridge_helper="/usr/lib/qemu/qemu-bridge-helper"
+    if [ -f "$bridge_helper" ]; then
+        sudo chmod u+s "$bridge_helper"
+        echo "  ✓ Установлены SUID права на qemu-bridge-helper"
+    else
+        echo "  ⚠ Предупреждение: qemu-bridge-helper не найден по пути $bridge_helper"
+    fi
+    
+    # Создаем скрипты для подключения tap интерфейсов к virbr0
+    echo "  Создание QEMU ifup/ifdown скриптов для virbr0..."
+    
+    # Скрипт для поднятия интерфейса
+    sudo tee /etc/qemu-ifup-virbr0 > /dev/null << 'EOF'
+#!/bin/bash
+# Скрипт для подключения tap интерфейса к virbr0
+BRIDGE="virbr0"
+TAP="$1"
+
+if [ -z "$TAP" ]; then
+    echo "Ошибка: не указан tap интерфейс"
+    exit 1
+fi
+
+# Поднимаем интерфейс
+ip link set "$TAP" up
+
+# Добавляем в bridge
+brctl addif "$BRIDGE" "$TAP" 2>/dev/null || ip link set "$TAP" master "$BRIDGE"
+
+exit 0
+EOF
+    
+    sudo chmod +x /etc/qemu-ifup-virbr0
+    echo "  ✓ Создан /etc/qemu-ifup-virbr0"
+    
+    # Скрипт для удаления интерфейса
+    sudo tee /etc/qemu-ifdown-virbr0 > /dev/null << 'EOF'
+#!/bin/bash
+# Скрипт для отключения tap интерфейса от virbr0
+BRIDGE="virbr0"
+TAP="$1"
+
+if [ -z "$TAP" ]; then
+    echo "Ошибка: не указан tap интерфейс"
+    exit 1
+fi
+
+# Удаляем из bridge
+brctl delif "$BRIDGE" "$TAP" 2>/dev/null || ip link set "$TAP" nomaster
+
+# Опускаем интерфейс
+ip link set "$TAP" down
+
+exit 0
+EOF
+    
+    sudo chmod +x /etc/qemu-ifdown-virbr0
+    echo "  ✓ Создан /etc/qemu-ifdown-virbr0"
+    
+    echo "  ✓ Libvirt networking настроен"
     echo ""
 }
 

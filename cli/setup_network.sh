@@ -245,32 +245,17 @@ prepare_host_network() {
     echo "=========================================="
     echo ""
     
+    # Включаем IP forwarding (может потребоваться для NAT внутри VPP)
+    echo "=== Включение IP forwarding ==="
     sudo sysctl -w net.ipv4.ip_forward=1
-    
-    # Создание bridge
-    create_br0_bridge "$BR0_INTERFACE"
-    
-    # Создание tap-интерфейсов
-    echo "=== Создание tap-интерфейсов ==="
-    for tap_name in "${TAP_INTERFACES[@]}"; do
-        create_tap_interface "$tap_name"
-    done
+    echo "  ✓ IP forwarding включен"
     echo ""
     
-    # Подключение tap-интерфейсов к bridge
-    echo "=== Подключение tap-интерфейсов к bridge $BR0_INTERFACE ==="
-    for tap_name in "${TAP_INTERFACES[@]}"; do
-        connect_interface_to_bridge "$tap_name" "$BR0_INTERFACE"
-    done
-    echo ""
-    
-    # Подключение veth-интерфейса к bridge
-    echo "=== Подключение veth-интерфейса ${VETH_HOST_IN_IF_NAME} к bridge $BR0_INTERFACE ==="
-    connect_interface_to_bridge "$VETH_HOST_IN_IF_NAME" "$BR0_INTERFACE"
-    echo ""
-    
-    # Настройка NAT
-    setup_nat "$ETH0_INTERFACE"
+    # DEPRECATED: Создание bridge и tap интерфейсов (больше не используется)
+    # create_br0_bridge "$BR0_INTERFACE"
+    # create_tap_interface ...
+    # connect_interface_to_bridge ...
+    # setup_nat "$ETH0_INTERFACE"
     
     echo "=========================================="
     echo "✓ Подготовка сетевой топологии хоста завершена"
@@ -283,24 +268,24 @@ set_ifaces_up() {
     echo "=========================================="
     echo ""
 
-    # Поднимаем хостовые интерфейсы
-    set_host_ifaces_up "$BR0_INTERFACE" "${TAP_INTERFACES[@]}"
-
+    # Хостовые интерфейсы не требуются в новой архитектуре
+    # (всё взаимодействие идёт через VPP и vhost-user)
+    
     # Поднимаем интерфейсы внутри VPP
     local vpp_ifaces=()
-    vpp_ifaces+=("$VETH_VPP_IF_NAME")
-    vpp_ifaces+=("$VPP_BVI_INTERFACE")
-    vpp_ifaces+=("${VHOST_USER_VPP_IFACES[@]}")
+    vpp_ifaces+=("$EXTERNAL_VHOST_VPP_IFACE")  # External VM vhost интерфейс
+    vpp_ifaces+=("$VPP_BVI_INTERFACE")          # Bridge Virtual Interface
+    vpp_ifaces+=("${VHOST_USER_VPP_IFACES[@]}") # User VMs vhost интерфейсы
 
     set_vpp_ifaces_up "${vpp_ifaces[@]}"
 }
 
 setup_network_main() {
     setup_vpp_service
-    # setup_vhost_sockets
-    create_veth_pair_and_connect_to_vpp "$VETH_HOST_IN_IF_NAME" "$VETH_HOST_OUT_IF_NAME"
-    #prepare_host_network
-    #prepare_vpp_network
-    #set_ifaces_up
+    prepare_host_network
+    create_external_vhost_interface  # Создаём vhost для external VM (заменяет veth-пару)
+    setup_vhost_sockets               # Создаём vhost для user VMs
+    prepare_vpp_network               # Настраиваем bridge domain и BVI
+    set_ifaces_up                     # Поднимаем все интерфейсы
 }
 

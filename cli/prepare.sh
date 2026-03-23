@@ -76,8 +76,8 @@ prepare_main() {
 
     echo ""
 
-    # 3. Отключение libvirt networking
-    disable_libvirt_networking
+    # 3. Настройка libvirt networking
+    configure_libvirt_networking
 
     echo "=========================================="
     echo "✓ Подготовка окружения завершена"
