@@ -6,6 +6,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/shell_helpers/vpp_helpers.sh"
+source "${SCRIPT_DIR}/shell_helpers/libvirt.sh"
 
 # Основная функция подготовки окружения
 prepare_main() {
@@ -55,6 +56,7 @@ prepare_main() {
         "virt-manager"
         "cloud-image-utils"
         "socat"
+        "iptables"
     )
 
     echo "Обновление списка пакетов..."
@@ -83,4 +85,3 @@ prepare_main() {
     echo "✓ Подготовка окружения завершена"
     echo "=========================================="
 }
-

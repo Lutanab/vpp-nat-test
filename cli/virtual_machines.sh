@@ -97,14 +97,15 @@ create_user_vm_systemd_unit() {
   local socket_path="$2"
   local mac_address="$3"
   local unit_name="$4"
+  local libvirt_mac="$5"
   local disk_image="${VM_STORAGE_PATH}/${vm_dir}/disk.img"
   local seed_image="${VM_STORAGE_PATH}/${vm_dir}/seed.iso"
   local unit_path="/etc/systemd/system/${unit_name}.service"
   local host_mount_dir
   host_mount_dir="$(vm_host_mount_dir "${vm_dir}")"
 
-  if [[ -z "${vm_dir}" || -z "${socket_path}" || -z "${mac_address}" || -z "${unit_name}" ]]; then
-    echo "Usage: create_user_vm_systemd_unit <vm_dir> <socket_path> <mac_address> <unit_name>" >&2
+  if [[ -z "${vm_dir}" || -z "${socket_path}" || -z "${mac_address}" || -z "${unit_name}" || -z "${libvirt_mac}" ]]; then
+    echo "Usage: create_user_vm_systemd_unit <vm_dir> <socket_path> <mac_address> <unit_name> <libvirt_mac>" >&2
     return 1
   fi
 
@@ -138,7 +139,7 @@ ExecStart=/usr/bin/qemu-system-x86_64 \
   -netdev vhost-user,id=net0,chardev=char0 \
   -device virtio-net-pci,netdev=net0,mac=${mac_address} \
   -netdev tap,id=net1,script=/etc/qemu-ifup-virbr0,downscript=/etc/qemu-ifdown-virbr0 \
-  -device virtio-net-pci,netdev=net1 \
+  -device virtio-net-pci,netdev=net1,mac=${libvirt_mac} \
   -virtfs local,path=${host_mount_dir},security_model=none,mount_tag=hostshare,id=hostshare \
   -serial unix:${console_path},server,nowait \
   -nographic
@@ -156,6 +157,7 @@ create_external_vm_systemd_unit() {
   local vm_dir="$EXTERNAL_VM_DIR"
   local socket_path="$EXTERNAL_VHOST_SOCKET"
   local mac_address="$EXTERNAL_VM_MAC"
+  local libvirt_mac="$EXTERNAL_VM_LIBVIRT_MAC"
   local unit_name="$EXTERNAL_VM_SYSTEMD_UNIT"
   local disk_image="${VM_STORAGE_PATH}/${vm_dir}/disk.img"
   local seed_image="${VM_STORAGE_PATH}/${vm_dir}/seed.iso"
@@ -193,7 +195,7 @@ ExecStart=/usr/bin/qemu-system-x86_64 \\
   -netdev vhost-user,id=net0,chardev=char0 \\
   -device virtio-net-pci,netdev=net0,mac=${mac_address} \\
   -netdev tap,id=net1,script=/etc/qemu-ifup-virbr0,downscript=/etc/qemu-ifdown-virbr0 \\
-  -device virtio-net-pci,netdev=net1 \\
+  -device virtio-net-pci,netdev=net1,mac=${libvirt_mac} \\
   -virtfs local,path=${host_mount_dir},security_model=none,mount_tag=hostshare,id=hostshare \\
   -serial unix:${console_path},server,nowait \\
   -nographic
@@ -234,9 +236,10 @@ configure_and_deploy_vms() {
     local socket_path="${VHOST_SOCKETS[$i]}"
     local mac_address="${USER_MACHINES_MAC[$i]}"
     local unit_name="${USER_MACHINES_SYSTEMD_UNIT_NAME[$i]}"
+    local libvirt_mac="${USER_MACHINES_LIBVIRT_MAC[$i]}"
 
     echo "--- Настройка ${unit_name} ---"
-    create_user_vm_systemd_unit "${vm_dir}" "${socket_path}" "${mac_address}" "${unit_name}"
+    create_user_vm_systemd_unit "${vm_dir}" "${socket_path}" "${mac_address}" "${unit_name}" "${libvirt_mac}"
   done
 
   sudo systemctl daemon-reload

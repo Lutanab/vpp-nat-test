@@ -49,6 +49,24 @@ export EXTERNAL_VM_SYSTEMD_UNIT="vpp-external-machine"
 # Глобальная переменная для имени vhost интерфейса external VM в VPP
 export EXTERNAL_VHOST_VPP_IFACE=""
 
+# Константы для libvirt management сети (интерфейс ens4 в VM)
+export LIBVIRT_NETWORK_NAME="default"
+export LIBVIRT_BRIDGE_NAME="virbr0"
+export LIBVIRT_GATEWAY_IP="10.8.2.1"
+export LIBVIRT_NETMASK="255.255.255.0"
+export LIBVIRT_DHCP_RANGE_START="10.8.2.2"
+export LIBVIRT_DHCP_RANGE_END="10.8.2.254"
+
+# Фиксированные leases для management-интерфейсов VM
+export EXTERNAL_VM_LIBVIRT_IP="10.8.2.10"
+export EXTERNAL_VM_LIBVIRT_MAC="52:54:00:10:02:01"
+export USER_MACHINES_LIBVIRT_IP=("10.8.2.11" "10.8.2.12")
+export USER_MACHINES_LIBVIRT_MAC=("52:54:00:10:02:02" "52:54:00:10:02:03")
+
+# SSH host-port forwarding: host:<port> -> vm:22
+export EXTERNAL_VM_SSH_HOST_PORT="8022"
+export USER_MACHINES_SSH_HOST_PORT=("8122" "8222")
+
 # Константы для veth-пары (DEPRECATED - заменено на external VM vhost)
 # export VETH_HOST_IN_IF_NAME="vpp0"
 # export VETH_HOST_OUT_IF_NAME="vpp0-out"
@@ -59,4 +77,3 @@ export VPP_BRIDGE_DOMAIN_ID="10"
 export VPP_BVI_INTERFACE=""
 export VPP_BVI_IP="10.8.1.1"
 export VPP_BVI_CIDR="24"
-
