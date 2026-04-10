@@ -1,3 +1,72 @@
+ensure_vm_storage_ready() {
+  echo "=== Подготовка storage для виртуальных машин ==="
+
+  # Базовая директория для VM-образов
+  mkdir -p "${VM_STORAGE_PATH}"
+
+  if [[ ! -f "${VM_BASE_IMAGE_PATH}" ]]; then
+    echo "  ✗ Базовый cloud-image не найден: ${VM_BASE_IMAGE_PATH}"
+    echo "  Скачайте его, например:"
+    echo "    mkdir -p ${VM_STORAGE_PATH}"
+    echo "    wget -O ${VM_BASE_IMAGE_PATH} https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+    return 1
+  fi
+
+  if ! command -v qemu-img >/dev/null 2>&1; then
+    echo "  ✗ Команда qemu-img не найдена. Установите qemu-utils."
+    return 1
+  fi
+
+  local vm_dirs=("${EXTERNAL_VM_DIR}" "${USER_MACHINES_DIR[@]}")
+  for vm_dir in "${vm_dirs[@]}"; do
+    local vm_storage_dir="${VM_STORAGE_PATH}/${vm_dir}"
+    local disk_image="${vm_storage_dir}/disk.img"
+
+    mkdir -p "${vm_storage_dir}"
+
+    if [[ -f "${disk_image}" ]]; then
+      echo "  ✓ Диск уже существует: ${disk_image}"
+      continue
+    fi
+
+    echo "  Создание диска VM: ${disk_image}"
+    if qemu-img create -f qcow2 -F qcow2 -b "${VM_BASE_IMAGE_PATH}" "${disk_image}" >/dev/null; then
+      echo "  ✓ Диск создан (overlay на базовый образ)"
+    else
+      echo "  ✗ Не удалось создать диск: ${disk_image}"
+      return 1
+    fi
+  done
+
+  echo "  ✓ Storage для VM подготовлен"
+  echo ""
+}
+
+vm_host_mount_dir() {
+  local vm_dir="$1"
+  echo "${PROJECT_ROOT}/virtual_machines/host_mounts/${vm_dir}"
+}
+
+ensure_vm_host_mounts_ready() {
+  echo "=== Подготовка хостовых директорий для /mnt/host в VM ==="
+
+  local owner_user="${SUDO_USER:-$USER}"
+  local owner_group
+  owner_group="$(id -gn "${owner_user}" 2>/dev/null || echo "${owner_user}")"
+
+  local vm_dirs=("${EXTERNAL_VM_DIR}" "${USER_MACHINES_DIR[@]}")
+  for vm_dir in "${vm_dirs[@]}"; do
+    local host_mount_dir
+    host_mount_dir="$(vm_host_mount_dir "${vm_dir}")"
+    mkdir -p "${host_mount_dir}"
+    chown "${owner_user}:${owner_group}" "${host_mount_dir}" 2>/dev/null || true
+    echo "  ✓ ${host_mount_dir}"
+  done
+
+  echo "  ✓ Хостовые директории для VM готовы"
+  echo ""
+}
+
 prepare_vm_seed() {
   local vm_dir="$1"
   local seed_image="$2"
@@ -31,6 +100,8 @@ create_user_vm_systemd_unit() {
   local disk_image="${VM_STORAGE_PATH}/${vm_dir}/disk.img"
   local seed_image="${VM_STORAGE_PATH}/${vm_dir}/seed.iso"
   local unit_path="/etc/systemd/system/${unit_name}.service"
+  local host_mount_dir
+  host_mount_dir="$(vm_host_mount_dir "${vm_dir}")"
 
   if [[ -z "${vm_dir}" || -z "${socket_path}" || -z "${mac_address}" || -z "${unit_name}" ]]; then
     echo "Usage: create_user_vm_systemd_unit <vm_dir> <socket_path> <mac_address> <unit_name>" >&2
@@ -68,6 +139,7 @@ ExecStart=/usr/bin/qemu-system-x86_64 \
   -device virtio-net-pci,netdev=net0,mac=${mac_address} \
   -netdev tap,id=net1,script=/etc/qemu-ifup-virbr0,downscript=/etc/qemu-ifdown-virbr0 \
   -device virtio-net-pci,netdev=net1 \
+  -virtfs local,path=${host_mount_dir},security_model=none,mount_tag=hostshare,id=hostshare \
   -serial unix:${console_path},server,nowait \
   -nographic
 Restart=on-failure
@@ -88,6 +160,8 @@ create_external_vm_systemd_unit() {
   local disk_image="${VM_STORAGE_PATH}/${vm_dir}/disk.img"
   local seed_image="${VM_STORAGE_PATH}/${vm_dir}/seed.iso"
   local unit_path="/etc/systemd/system/${unit_name}.service"
+  local host_mount_dir
+  host_mount_dir="$(vm_host_mount_dir "${vm_dir}")"
 
   echo "=== Создание systemd-юнита для внешней VM ${unit_name} ==="
   prepare_vm_seed "${vm_dir}" "${seed_image}"
@@ -120,6 +194,7 @@ ExecStart=/usr/bin/qemu-system-x86_64 \\
   -device virtio-net-pci,netdev=net0,mac=${mac_address} \\
   -netdev tap,id=net1,script=/etc/qemu-ifup-virbr0,downscript=/etc/qemu-ifdown-virbr0 \\
   -device virtio-net-pci,netdev=net1 \\
+  -virtfs local,path=${host_mount_dir},security_model=none,mount_tag=hostshare,id=hostshare \\
   -serial unix:${console_path},server,nowait \\
   -nographic
 Restart=on-failure
@@ -143,6 +218,10 @@ configure_and_deploy_vms() {
   sudo chmod 777 /var/run/vpp/console
   echo "  ✓ Директория для консолей создана: /var/run/vpp/console"
   echo ""
+
+  # Подготавливаем storage и диски VM
+  ensure_vm_storage_ready
+  ensure_vm_host_mounts_ready
 
   # Создаём внешнюю VM для NAT трафика
   echo "--- Настройка внешней VM ---"

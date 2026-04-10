@@ -46,8 +46,10 @@ sudo ./manage prepare
 
 Очередной раз собрать:
 ```bash
+cd vpp
 sudo make pkg-deb-debug
 sudo dpkg -i build-root/*.deb
+cd ../
 ```
 
 Если перетер конфиги (напр startup.conf):
