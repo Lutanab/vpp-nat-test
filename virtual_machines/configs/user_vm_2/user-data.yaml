@@ -14,3 +14,23 @@ users:
 ssh_pwauth: false
 disable_root: true
 
+write_files:
+  - path: /etc/modules-load.d/9p.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      9p
+      9pnet
+      9pnet_virtio
+
+bootcmd:
+  - mkdir -p /mnt/host
+
+runcmd:
+  - modprobe 9p || true
+  - modprobe 9pnet || true
+  - modprobe 9pnet_virtio || true
+  - mount /mnt/host || true
+
+mounts:
+  - [hostshare, /mnt/host, 9p, "trans=virtio,version=9p2000.L,rw,nofail,_netdev", "0", "0"]
