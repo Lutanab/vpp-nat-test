@@ -2,4 +2,4 @@
 external-vm:
 curl --noproxy '*' http://10.8.0.2:8080/test
 user-vm-2:
-curl --noproxy '*' http://10.8.0.2:8080/test
+curl --noproxy '*' http://10.8.1.3:8080/test

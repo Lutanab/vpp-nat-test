@@ -115,16 +115,16 @@ create_external_vhost_interface() {
     fi
     
     # Устанавливаем IP адрес на интерфейс внутри VPP (сторона VPP в сети 10.8.0.0/24)
-    echo "  Установка IP адреса 10.8.0.1/24 на интерфейс $EXTERNAL_VHOST_VPP_IFACE"
-    if vppctl set interface ip address "$EXTERNAL_VHOST_VPP_IFACE" 10.8.0.1/24 2>&1; then
+    echo "  Установка IP адреса $EXTERNAL_VPP_IP/$EXTERNAL_VPP_CIDR на интерфейс $EXTERNAL_VHOST_VPP_IFACE"
+    if vppctl set interface ip address "$EXTERNAL_VHOST_VPP_IFACE" "$EXTERNAL_VPP_IP/$EXTERNAL_VPP_CIDR" 2>&1; then
         echo "  ✓ IP адрес установлен"
     else
         echo "  ✗ Ошибка при установке IP адреса"
         exit 1
     fi
     
-    echo "  ✓ External vhost-интерфейс готов: $EXTERNAL_VHOST_VPP_IFACE (10.8.0.1/24, DOWN)"
-    echo "  ℹ External VM должна использовать IP 10.8.0.2/24 с gateway 10.8.0.1"
+    echo "  ✓ External vhost-интерфейс готов: $EXTERNAL_VHOST_VPP_IFACE ($EXTERNAL_VPP_IP/$EXTERNAL_VPP_CIDR, DOWN)"
+    echo "  ℹ External VM должна использовать IP $EXTERNAL_VM_IP/$EXTERNAL_VPP_CIDR с gateway $EXTERNAL_VPP_IP"
     echo ""
 }
 
@@ -308,5 +308,137 @@ prepare_vpp_network() {
     fi
     
     echo "  ✓ VPP bridge сеть подготовлена (bridge-domain $VPP_BRIDGE_DOMAIN_ID, BVI $VPP_BVI_INTERFACE с IP $VPP_BVI_IP/$VPP_BVI_CIDR, состояние DOWN)"
+    echo ""
+}
+
+configure_vpp_nat_plugins_for_mode() {
+    local nat_mode="$1"
+    local startup_conf="/etc/vpp/startup.conf"
+    local natmvp_plugin_state=""
+    local nat44_plugin_state=""
+
+    case "$nat_mode" in
+        none)
+            natmvp_plugin_state="disable"
+            nat44_plugin_state="disable"
+            ;;
+        nat44)
+            natmvp_plugin_state="disable"
+            nat44_plugin_state="enable"
+            ;;
+        natmvp)
+            natmvp_plugin_state="enable"
+            nat44_plugin_state="disable"
+            ;;
+        *)
+            echo "✗ Ошибка: неподдерживаемый nat-mode '$nat_mode'"
+            exit 1
+            ;;
+    esac
+
+    echo "=== Настройка VPP plugins для NAT режима '$nat_mode' ==="
+
+    if ! sudo test -f "$startup_conf"; then
+        echo "  ✗ Файл $startup_conf не найден"
+        exit 1
+    fi
+
+    local tmp_original
+    local tmp_without_block
+    local tmp_final
+    tmp_original="$(mktemp)"
+    tmp_without_block="$(mktemp)"
+    tmp_final="$(mktemp)"
+
+    # Считываем текущий startup.conf
+    sudo cat "$startup_conf" > "$tmp_original"
+
+    # Удаляем ранее управляемый блок (если есть)
+    awk '
+        /^# BEGIN VPP_NAT_TEST_MANAGED_PLUGINS$/ { skip=1; next }
+        /^# END VPP_NAT_TEST_MANAGED_PLUGINS$/ { skip=0; next }
+        skip != 1 { print }
+    ' "$tmp_original" > "$tmp_without_block"
+
+    # Убираем любые существующие живые строки настройки nat-плагинов, чтобы избежать дубликатов
+    sed -E \
+        -e '/^[[:space:]]*plugin[[:space:]]+natmvp_plugin\.so[[:space:]]*\{.*\}[[:space:]]*$/d' \
+        -e '/^[[:space:]]*plugin[[:space:]]+nat_plugin\.so[[:space:]]*\{.*\}[[:space:]]*$/d' \
+        "$tmp_without_block" > "$tmp_final"
+
+    cat >> "$tmp_final" << EOF
+
+# BEGIN VPP_NAT_TEST_MANAGED_PLUGINS
+plugins {
+  plugin natmvp_plugin.so { $natmvp_plugin_state }
+  plugin nat_plugin.so { $nat44_plugin_state }
+}
+# END VPP_NAT_TEST_MANAGED_PLUGINS
+EOF
+
+    sudo tee "$startup_conf" >/dev/null < "$tmp_final"
+
+    rm -f "$tmp_original" "$tmp_without_block" "$tmp_final"
+
+    echo "  ✓ Обновлён $startup_conf"
+    echo "    - natmvp_plugin.so: $natmvp_plugin_state"
+    echo "    - nat_plugin.so: $nat44_plugin_state"
+    echo ""
+}
+
+run_vppctl_command_or_fail() {
+    local description="$1"
+    local command="$2"
+    local output
+
+    if output=$(vppctl "$command" 2>&1); then
+        echo "  ✓ $description"
+        if [ -n "$output" ]; then
+            echo "$output" | sed 's/^/    /'
+        fi
+    else
+        echo "  ✗ $description"
+        if [ -n "$output" ]; then
+            echo "$output" | sed 's/^/    /'
+        fi
+        exit 1
+    fi
+}
+
+configure_vpp_nat_runtime_mode() {
+    local nat_mode="$1"
+    local inside_iface="$2"
+    local outside_iface="$3"
+
+    if [ -z "$inside_iface" ] || [ -z "$outside_iface" ]; then
+        echo "✗ Ошибка: для NAT-конфигурации не заданы inside/outside интерфейсы"
+        exit 1
+    fi
+
+    echo "=== Конфигурация NAT режима '$nat_mode' ==="
+
+    case "$nat_mode" in
+        none)
+            echo "  ✓ NAT отключен (режим none)"
+            ;;
+        nat44)
+            run_vppctl_command_or_fail "NAT44 plugin включен (sessions ${NAT44_MAX_SESSIONS})" "nat44 plugin enable sessions ${NAT44_MAX_SESSIONS}"
+            run_vppctl_command_or_fail "Роли NAT44 интерфейсов установлены" "set interface nat44 in ${inside_iface} out ${outside_iface}"
+            run_vppctl_command_or_fail "Внешний NAT44 адрес привязан к интерфейсу ${outside_iface}" "nat44 add interface address ${outside_iface}"
+            run_vppctl_command_or_fail "NAT44 summary" "show nat44 summary"
+            ;;
+        natmvp)
+            run_vppctl_command_or_fail "NATMVP public address установлен (${NATMVP_PUBLIC_ADDR})" "natmvp set public-addr ${NATMVP_PUBLIC_ADDR}"
+            run_vppctl_command_or_fail "NATMVP диапазон портов установлен (${NATMVP_PORT_RANGE_START}-${NATMVP_PORT_RANGE_END})" "natmvp set port-range ${NATMVP_PORT_RANGE_START} ${NATMVP_PORT_RANGE_END}"
+            run_vppctl_command_or_fail "NATMVP inside интерфейс установлен (${inside_iface})" "natmvp interface inside ${inside_iface}"
+            run_vppctl_command_or_fail "NATMVP outside интерфейс установлен (${outside_iface})" "natmvp interface outside ${outside_iface}"
+            run_vppctl_command_or_fail "NATMVP summary" "show natmvp"
+            ;;
+        *)
+            echo "  ✗ Ошибка: неподдерживаемый nat-mode '$nat_mode'"
+            exit 1
+            ;;
+    esac
+
     echo ""
 }

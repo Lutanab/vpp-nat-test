@@ -46,6 +46,8 @@ export VHOST_USER_VPP_IFACES=()
 export EXTERNAL_VM_DIR="external_vm"
 export EXTERNAL_VHOST_SOCKET="/var/run/vpp/vhost0.sock"
 export EXTERNAL_VM_IP="10.8.0.2"
+export EXTERNAL_VPP_IP="10.8.0.1"
+export EXTERNAL_VPP_CIDR="24"
 export EXTERNAL_VM_MAC="52:54:00:00:01:01"
 export EXTERNAL_VM_SYSTEMD_UNIT="vpp-external-machine"
 # Глобальная переменная для имени vhost интерфейса external VM в VPP
@@ -79,3 +81,9 @@ export VPP_BRIDGE_DOMAIN_ID="10"
 export VPP_BVI_INTERFACE=""
 export VPP_BVI_IP="10.8.1.1"
 export VPP_BVI_CIDR="24"
+
+# Константы для автоматической NAT-конфигурации setup-network
+export NAT44_MAX_SESSIONS="10000"
+export NATMVP_PUBLIC_ADDR="$EXTERNAL_VPP_IP"
+export NATMVP_PORT_RANGE_START="20000"
+export NATMVP_PORT_RANGE_END="40000"

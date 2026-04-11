@@ -9,7 +9,7 @@
 ### Доступные команды:
 
 - `prepare` - Подготовка окружения (установка зависимостей VPP, QEMU, настройка libvirt)
-- `setup-network` - Подготовка сетевой топологии (VPP bridge, vhost-интерфейсы, external vhost)
+- `setup-network` - Подготовка сетевой топологии (VPP bridge, vhost-интерфейсы, external vhost) + обязательный `--nat-mode <none|nat44|natmvp>`
 - `setup-vms` - Подготовка и запуск всех виртуальных машин (external VM + user VMs)
 - `stop-vms` - Остановка всех виртуальных машин
 - `clean-network` - Очистка сетевой топологии и vhost сокетов
@@ -26,8 +26,11 @@
 # 1. Подготовка окружения (один раз при установке)
 sudo ./manage prepare
 
-# 2. Подготовка сетевой топологии VPP
-sudo ./manage setup-network
+# 2. Подготовка сетевой топологии VPP (обязательно указать NAT режим)
+sudo ./manage setup-network --nat-mode none
+# или:
+sudo ./manage setup-network --nat-mode nat44
+sudo ./manage setup-network --nat-mode natmvp
 
 # 3. Запуск виртуальных машин
 sudo ./manage setup-vms
@@ -136,140 +139,85 @@ sudo ./manage stop-vms
 sudo ./manage setup-vms
 ```
 
-## MVP NAT-плагин `natmvp` (инструкция по применению)
+## NAT режимы в `setup-network`
 
-В репозиторий добавлен MVP stateful NAT-плагина VPP: `vpp/src/plugins/natmvp`.
-
-Ключевые свойства MVP:
-- две таблицы (`in2out` и `out2in`) со ссылкой на общий объект сессии;
-- per-bucket lock;
-- фиксированный порядок захвата локов для двухтабличных операций;
-- `exp_time` в сессии + lazy cleanup на write-path (при insert в oversized bucket).
-
-### 1. Сборка и установка VPP с плагином
+`setup-network` теперь принимает обязательный аргумент:
 
 ```bash
-cd vpp
-sudo make pkg-deb-debug
-sudo dpkg -i build-root/*.deb
-cd ..
+sudo ./manage setup-network --nat-mode <none|nat44|natmvp>
 ```
 
-### 2. Включение плагина в `startup.conf`
+Поддерживаются режимы:
+- `none` — NAT в VPP не используется;
+- `nat44` — используется дефолтный VPP NAT44;
+- `natmvp` — используется кастомный плагин `natmvp`.
 
-Добавьте в `/etc/vpp/startup.conf`:
+Что делает команда автоматически:
+- обновляет в `/etc/vpp/startup.conf` управляемый блок плагинов (`nat_plugin.so` / `natmvp_plugin.so`);
+- перезапускает VPP;
+- поднимает VPP-сетевую топологию (vhost + bridge/BVI);
+- применяет runtime-конфигурацию выбранного NAT-режима.
 
-```conf
-plugins {
-  plugin natmvp_plugin.so { enable }
-}
-```
-
-После этого перезапустите VPP:
+### `natmvp` режим
 
 ```bash
-sudo systemctl restart vpp
+sudo ./manage setup-network --nat-mode natmvp
 ```
 
-### 3. Базовая конфигурация в `vppctl`
+Автоматически применяются команды:
+- `natmvp set public-addr 10.8.0.1`
+- `natmvp set port-range 20000 40000`
+- `natmvp interface inside <BVI>`
+- `natmvp interface outside <external-vhost>`
+
+Проверка:
 
 ```bash
-sudo vppctl
+sudo vppctl show natmvp
 ```
 
-Пример настройки:
-
-```vpp
-natmvp set public-addr 203.0.113.10
-natmvp set port-range 20000 40000
-
-natmvp interface inside GigabitEthernet0/8/0
-natmvp interface outside GigabitEthernet0/9/0
-```
-
-Где:
-- `inside` — интерфейс для исходящего трафика internal -> remote;
-- `outside` — интерфейс для входящего трафика remote -> public.
-
-### 4. Проверка
-
-```vpp
-show natmvp
-```
-
-Команда выводит:
-- текущий public IP;
-- диапазон портов;
-- число сессий (`live` и `total`).
-
-### 5. Очистка сессий
-
-```vpp
-natmvp clear sessions
-```
-
-## Дефолтный NAT-плагин VPP (`nat44`) для сравнения
-
-Если хотите сравнить поведение с вашим `natmvp`, поднимайте стандартный NAT VPP по шагам ниже.
-
-### 1. Соберите и установите VPP
+### `nat44` режим
 
 ```bash
-cd vpp
-sudo make pkg-deb-debug
-sudo dpkg -i build-root/*.deb
-cd ..
+sudo ./manage setup-network --nat-mode nat44
 ```
 
-### 2. Переключите плагины в `startup.conf`
+Автоматически применяются команды:
+- `nat44 plugin enable sessions 10000`
+- `set interface nat44 in <BVI> out <external-vhost>`
+- `nat44 add interface address <external-vhost>`
 
-В `/etc/vpp/startup.conf` укажите:
-
-```conf
-plugins {
-  plugin natmvp_plugin.so { disable }
-  plugin nat_plugin.so { enable }
-}
-```
-
-После этого перезапустите VPP:
+Проверка:
 
 ```bash
-sudo systemctl restart vpp
+sudo vppctl show nat44 summary
+sudo vppctl show nat44 interfaces
 ```
 
-### 3. Включите `nat44` и задайте роли интерфейсов
+### `none` режим
 
 ```bash
-sudo vppctl
+sudo ./manage setup-network --nat-mode none
 ```
 
-Пример минимальной динамической NAT44-конфигурации:
+В этом режиме NAT-плагины выключаются в managed-блоке `startup.conf`, и runtime NAT-конфигурация не применяется.
 
-```vpp
-nat44 plugin enable sessions 10000
-set interface nat44 in GigabitEthernet0/8/0 out GigabitEthernet0/9/0
-nat44 add address 203.0.113.10
+### Смена NAT-режима (рекомендуемый сценарий)
+
+При переключении режима NAT лучше выполнять полный цикл перезапуска топологии:
+
+```bash
+# 1) Остановить все VM
+sudo ./manage stop-vms
+
+# 2) Очистить сеть (остановка VPP + удаление старых интерфейсов)
+sudo ./manage clean-network
+
+# 3) Поднять сеть с нужным NAT-режимом
+sudo ./manage setup-network --nat-mode <none|nat44|natmvp>
+
+# 4) Снова запустить VM
+sudo ./manage setup-vms
 ```
 
-Альтернатива для внешнего адреса с интерфейса:
-
-```vpp
-nat44 add interface address GigabitEthernet0/9/0
-```
-
-### 4. Проверка состояния
-
-```vpp
-show nat44 summary
-show nat44 interfaces
-show nat44 addresses
-show nat44 sessions
-```
-
-### 5. Очистка сессий / выключение
-
-```vpp
-clear nat44 ed sessions
-nat44 plugin disable
-```
+Это снижает риск «залипших» vhost-сокетов и рассинхронизации между VPP и уже запущенными VM.

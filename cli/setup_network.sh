@@ -1,5 +1,7 @@
 #!/bin/bash
 
+SETUP_NETWORK_NAT_MODE=""
+
 # Функция для идемпотентного создания bridge и назначения IP
 create_br0_bridge() {
     local bridge_name="$1"
@@ -280,12 +282,84 @@ set_ifaces_up() {
     set_vpp_ifaces_up "${vpp_ifaces[@]}"
 }
 
+show_setup_network_usage() {
+    cat << EOF
+Использование:
+  ./manage setup-network --nat-mode <none|nat44|natmvp>
+
+Обязательный параметр:
+  --nat-mode  Режим NAT в VPP:
+              none   - NAT не используется
+              nat44  - дефолтный VPP nat44
+              natmvp - кастомный плагин natmvp
+EOF
+}
+
+parse_setup_network_args() {
+    SETUP_NETWORK_NAT_MODE=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --nat-mode)
+                if [ $# -lt 2 ]; then
+                    echo "✗ Ошибка: после --nat-mode требуется значение"
+                    show_setup_network_usage
+                    exit 1
+                fi
+                if [ -n "$SETUP_NETWORK_NAT_MODE" ]; then
+                    echo "✗ Ошибка: --nat-mode указан более одного раза"
+                    show_setup_network_usage
+                    exit 1
+                fi
+                SETUP_NETWORK_NAT_MODE="$2"
+                shift 2
+                ;;
+            --nat-mode=*)
+                if [ -n "$SETUP_NETWORK_NAT_MODE" ]; then
+                    echo "✗ Ошибка: --nat-mode указан более одного раза"
+                    show_setup_network_usage
+                    exit 1
+                fi
+                SETUP_NETWORK_NAT_MODE="${1#*=}"
+                shift
+                ;;
+            -h|--help)
+                show_setup_network_usage
+                exit 0
+                ;;
+            *)
+                echo "✗ Ошибка: неизвестный аргумент '$1'"
+                show_setup_network_usage
+                exit 1
+                ;;
+        esac
+    done
+
+    if [ -z "$SETUP_NETWORK_NAT_MODE" ]; then
+        echo "✗ Ошибка: параметр --nat-mode обязателен"
+        show_setup_network_usage
+        exit 1
+    fi
+
+    case "$SETUP_NETWORK_NAT_MODE" in
+        none|nat44|natmvp)
+            ;;
+        *)
+            echo "✗ Ошибка: неподдерживаемый --nat-mode '$SETUP_NETWORK_NAT_MODE'"
+            show_setup_network_usage
+            exit 1
+            ;;
+    esac
+}
+
 setup_network_main() {
+    parse_setup_network_args "$@"
+    configure_vpp_nat_plugins_for_mode "$SETUP_NETWORK_NAT_MODE"
     setup_vpp_service
     prepare_host_network
     create_external_vhost_interface  # Создаём vhost для external VM (заменяет veth-пару)
     setup_vhost_sockets               # Создаём vhost для user VMs
     prepare_vpp_network               # Настраиваем bridge domain и BVI
     set_ifaces_up                     # Поднимаем все интерфейсы
+    configure_vpp_nat_runtime_mode "$SETUP_NETWORK_NAT_MODE" "$VPP_BVI_INTERFACE" "$EXTERNAL_VHOST_VPP_IFACE"
 }
-
