@@ -13,6 +13,7 @@ users:
 
 ssh_pwauth: false
 disable_root: true
+ssh_deletekeys: false
 
 write_files:
   - path: /etc/modules-load.d/9p.conf

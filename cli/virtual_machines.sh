@@ -1,3 +1,67 @@
+size_to_bytes() {
+  local size="$1"
+
+  if command -v numfmt >/dev/null 2>&1; then
+    numfmt --from=iec "${size}" 2>/dev/null && return 0
+  fi
+
+  if [[ "${size}" =~ ^[0-9]+$ ]]; then
+    echo "${size}"
+    return 0
+  fi
+
+  if [[ "${size}" =~ ^([0-9]+)([KkMmGgTt])$ ]]; then
+    local number="${BASH_REMATCH[1]}"
+    local unit="${BASH_REMATCH[2]}"
+    case "${unit}" in
+      K|k) echo $((number * 1024)); return 0 ;;
+      M|m) echo $((number * 1024 * 1024)); return 0 ;;
+      G|g) echo $((number * 1024 * 1024 * 1024)); return 0 ;;
+      T|t) echo $((number * 1024 * 1024 * 1024 * 1024)); return 0 ;;
+    esac
+  fi
+
+  return 1
+}
+
+ensure_vm_disk_min_size() {
+  local disk_image="$1"
+  local min_size="${VM_MIN_DISK_SIZE:-15G}"
+
+  if [[ ! -f "${disk_image}" ]]; then
+    echo "  ✗ Диск не найден: ${disk_image}"
+    return 1
+  fi
+
+  local current_virtual_size_bytes
+  current_virtual_size_bytes="$(qemu-img info --force-share "${disk_image}" 2>/dev/null | sed -n 's/^virtual size: .* (\([0-9][0-9]*\) bytes)$/\1/p')"
+  if [[ -z "${current_virtual_size_bytes}" ]]; then
+    echo "  ✗ Не удалось определить текущий виртуальный размер диска: ${disk_image}"
+    return 1
+  fi
+
+  local min_size_bytes
+  min_size_bytes="$(size_to_bytes "${min_size}")"
+  if [[ -z "${min_size_bytes}" ]]; then
+    echo "  ✗ Некорректный размер VM_MIN_DISK_SIZE='${min_size}'. Пример: 15G"
+    return 1
+  fi
+
+  if (( current_virtual_size_bytes >= min_size_bytes )); then
+    echo "  ✓ Размер диска достаточный: ${disk_image} (>= ${min_size})"
+    return 0
+  fi
+
+  echo "  Увеличение виртуального диска до ${min_size}: ${disk_image}"
+  if qemu-img resize "${disk_image}" "${min_size}" >/dev/null; then
+    echo "  ✓ Диск увеличен до ${min_size}"
+  else
+    echo "  ✗ Не удалось увеличить диск: ${disk_image}"
+    echo "    Убедитесь, что VM остановлена (например: sudo ./manage stop-vms)"
+    return 1
+  fi
+}
+
 ensure_vm_storage_ready() {
   echo "=== Подготовка storage для виртуальных машин ==="
 
@@ -26,12 +90,14 @@ ensure_vm_storage_ready() {
 
     if [[ -f "${disk_image}" ]]; then
       echo "  ✓ Диск уже существует: ${disk_image}"
+      ensure_vm_disk_min_size "${disk_image}" || return 1
       continue
     fi
 
     echo "  Создание диска VM: ${disk_image}"
     if qemu-img create -f qcow2 -F qcow2 -b "${VM_BASE_IMAGE_PATH}" "${disk_image}" >/dev/null; then
       echo "  ✓ Диск создан (overlay на базовый образ)"
+      ensure_vm_disk_min_size "${disk_image}" || return 1
     else
       echo "  ✗ Не удалось создать диск: ${disk_image}"
       return 1

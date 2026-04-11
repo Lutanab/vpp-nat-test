@@ -21,6 +21,8 @@ export PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 export VM_STORAGE_PATH="${PROJECT_ROOT}/virtual_machines/storage"
 export VM_BASE_IMAGE_PATH="${VM_STORAGE_PATH}/noble-server-cloudimg-amd64.img"
+# Минимальный размер виртуального диска для каждой VM (увеличивается автоматически, без shrink)
+export VM_MIN_DISK_SIZE="15G"
 export USER_MACHINES_DIR=(
     "user_vm_1"
     "user_vm_2"
