@@ -119,6 +119,21 @@ sudo journalctl -u vpp-external-machine -f
 sudo journalctl -u vpp-user-machine1 -f
 ```
 
+## Health-серверы в ВМ
+
+На каждой VM (`external_vm`, `user_vm_1`, `user_vm_2`) настроен небольшой Python health-сервер на порту `7000`.
+Он запускается как обычный `systemd`-демон вместе с ОС и на любой HTTP-запрос отвечает `HTTP 200`.
+
+Это позволяет быстро проверить, жива ли VM:
+
+```bash
+curl -i http://10.8.2.10:7000/
+curl -i http://10.8.2.11:7000/
+curl -i http://10.8.2.12:7000/
+```
+
+Если VM работает и сервис поднят, в ответе будет статус `200`.
+
 ## Troubleshooting
 
 ### Проблема: VM не запускаются, ошибка "bridge helper failed"
@@ -176,6 +191,19 @@ sudo ./manage setup-network --nat-mode natmvp
 sudo vppctl show natmvp
 ```
 
+Если при `setup-network --nat-mode natmvp` видно `unknown input 'natmvp ...'`, это означает, что в системном VPP нет `natmvp_plugin.so` (или он не загрузился после рестарта).  
+Проверьте и переустановите пакеты VPP из этого репозитория:
+
+```bash
+ls /usr/lib/x86_64-linux-gnu/vpp_plugins/natmvp_plugin.so
+
+cd vpp
+sudo make pkg-deb-debug
+sudo dpkg -i build-root/*.deb
+sudo systemctl restart vpp
+sudo vppctl show plugins | grep natmvp
+```
+
 ### `nat44` режим
 
 ```bash
@@ -221,3 +249,19 @@ sudo ./manage setup-vms
 ```
 
 Это снижает риск «залипших» vhost-сокетов и рассинхронизации между VPP и уже запущенными VM.
+
+### Автоматическое переключение NAT через Python-скрипт
+
+Для автоматизации полного цикла используйте:
+
+```bash
+sudo ./switch_nat_mode.py <none|nat44|natmvp>
+```
+
+Скрипт выполняет шаги по порядку:
+- `./manage stop-vms`
+- `./manage clean-network`
+- если выбран `natmvp`: `cd vpp && make pkg-deb-debug`, затем `dpkg -i build-root/*.deb`
+- `./manage setup-network --nat-mode <mode>`
+- `./manage setup-vms`
+- healthcheck: для каждой VM polling `http://<vm-libvirt-ip>:7000/` (раз в 1 сек, до 2 минут) до `HTTP 200`

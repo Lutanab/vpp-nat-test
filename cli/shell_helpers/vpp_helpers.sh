@@ -392,6 +392,14 @@ run_vppctl_command_or_fail() {
     local output
 
     if output=$(vppctl "$command" 2>&1); then
+        # В некоторых версиях vppctl "unknown input" может вернуться с кодом 0,
+        # поэтому дополнительно валидируем текст ответа.
+        if echo "$output" | grep -Eiq 'unknown input|unknown command|parse error'; then
+            echo "  ✗ $description"
+            echo "    Команда: vppctl $command"
+            echo "$output" | sed 's/^/    /'
+            exit 1
+        fi
         echo "  ✓ $description"
         if [ -n "$output" ]; then
             echo "$output" | sed 's/^/    /'
@@ -401,6 +409,47 @@ run_vppctl_command_or_fail() {
         if [ -n "$output" ]; then
             echo "$output" | sed 's/^/    /'
         fi
+        exit 1
+    fi
+}
+
+ensure_natmvp_runtime_available_or_fail() {
+    local plugin_path=""
+    local plugins_output=""
+    local probe_output=""
+
+    # Проверяем, что плагин действительно установлен в системе.
+    plugin_path="$(find /usr/lib -maxdepth 4 -type f -name natmvp_plugin.so 2>/dev/null | head -n 1)"
+    if [ -z "$plugin_path" ]; then
+        echo "  ✗ NATMVP plugin не найден в системе (natmvp_plugin.so)"
+        echo "    Похоже, VPP установлен из пакетов без natmvp."
+        echo "    Пересоберите и переустановите пакеты из этого репозитория:"
+        echo "      cd vpp"
+        echo "      sudo make pkg-deb-debug"
+        echo "      sudo dpkg -i build-root/*.deb"
+        exit 1
+    fi
+
+    # Проверяем, что плагин загрузился в текущем процессе VPP после restart.
+    if ! plugins_output=$(vppctl show plugins 2>&1); then
+        echo "  ✗ Не удалось выполнить 'vppctl show plugins'"
+        echo "$plugins_output" | sed 's/^/    /'
+        exit 1
+    fi
+
+    if ! echo "$plugins_output" | grep -q "natmvp_plugin.so"; then
+        echo "  ✗ VPP не загрузил natmvp_plugin.so (несмотря на nat-mode=natmvp)"
+        echo "    Проверьте /etc/vpp/startup.conf и перезапустите VPP:"
+        echo "      sudo systemctl restart vpp"
+        echo "      sudo vppctl show plugins | grep natmvp"
+        exit 1
+    fi
+
+    # Финальная проверка: команда CLI natmvp должна распознаваться.
+    probe_output="$(vppctl show natmvp 2>&1 || true)"
+    if echo "$probe_output" | grep -Eiq 'unknown input|unknown command|parse error'; then
+        echo "  ✗ CLI 'natmvp' недоступен в VPP"
+        echo "$probe_output" | sed 's/^/    /'
         exit 1
     fi
 }
@@ -428,6 +477,7 @@ configure_vpp_nat_runtime_mode() {
             run_vppctl_command_or_fail "NAT44 summary" "show nat44 summary"
             ;;
         natmvp)
+            ensure_natmvp_runtime_available_or_fail
             run_vppctl_command_or_fail "NATMVP public address установлен (${NATMVP_PUBLIC_ADDR})" "natmvp set public-addr ${NATMVP_PUBLIC_ADDR}"
             run_vppctl_command_or_fail "NATMVP диапазон портов установлен (${NATMVP_PORT_RANGE_START}-${NATMVP_PORT_RANGE_END})" "natmvp set port-range ${NATMVP_PORT_RANGE_START} ${NATMVP_PORT_RANGE_END}"
             run_vppctl_command_or_fail "NATMVP inside интерфейс установлен (${inside_iface})" "natmvp interface inside ${inside_iface}"
