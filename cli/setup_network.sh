@@ -285,13 +285,13 @@ set_ifaces_up() {
 show_setup_network_usage() {
     cat << EOF
 Использование:
-  ./manage setup-network --nat-mode <none|nat44|natmvp>
+  ./manage setup-network --nat-mode <none|nat44|nat_fo>
 
 Обязательный параметр:
   --nat-mode  Режим NAT в VPP:
               none   - NAT не используется
               nat44  - дефолтный VPP nat44
-              natmvp - кастомный плагин natmvp
+              nat_fo - кастомный плагин nat_fo
 EOF
 }
 
@@ -342,7 +342,7 @@ parse_setup_network_args() {
     fi
 
     case "$SETUP_NETWORK_NAT_MODE" in
-        none|nat44|natmvp)
+        none|nat44|nat_fo)
             ;;
         *)
             echo "✗ Ошибка: неподдерживаемый --nat-mode '$SETUP_NETWORK_NAT_MODE'"

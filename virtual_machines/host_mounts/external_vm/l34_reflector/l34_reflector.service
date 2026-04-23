@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=__REFLECTOR_DIR__
-ExecStart=/usr/bin/python3 __REFLECTOR_DIR__/reflector_server.py
+ExecStart=/usr/bin/python3 -u __REFLECTOR_DIR__/reflector_server.py
 Restart=always
 RestartSec=2
 

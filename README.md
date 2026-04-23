@@ -9,7 +9,7 @@
 ### Доступные команды:
 
 - `prepare` - Подготовка окружения (установка зависимостей VPP, QEMU, настройка libvirt)
-- `setup-network` - Подготовка сетевой топологии (VPP bridge, vhost-интерфейсы, external vhost) + обязательный `--nat-mode <none|nat44|natmvp>`
+- `setup-network` - Подготовка сетевой топологии (VPP bridge, vhost-интерфейсы, external vhost) + обязательный `--nat-mode <none|nat44|nat_fo>`
 - `setup-vms` - Подготовка и запуск всех виртуальных машин (external VM + user VMs)
 - `stop-vms` - Остановка всех виртуальных машин
 - `clean-network` - Очистка сетевой топологии и vhost сокетов
@@ -30,7 +30,7 @@ sudo ./manage prepare
 sudo ./manage setup-network --nat-mode none
 # или:
 sudo ./manage setup-network --nat-mode nat44
-sudo ./manage setup-network --nat-mode natmvp
+sudo ./manage setup-network --nat-mode nat_fo
 
 # 3. Запуск виртуальных машин
 sudo ./manage setup-vms
@@ -127,12 +127,15 @@ sudo journalctl -u vpp-user-machine1 -f
 Это позволяет быстро проверить, жива ли VM:
 
 ```bash
-curl -i http://10.8.2.10:7000/
-curl -i http://10.8.2.11:7000/
-curl -i http://10.8.2.12:7000/
+curl --noproxy '*' -i http://10.8.2.10:7000/
+curl --noproxy '*' -i http://10.8.2.11:7000/
+curl --noproxy '*' -i http://10.8.2.12:7000/
 ```
 
 Если VM работает и сервис поднят, в ответе будет статус `200`.
+
+Если в окружении заданы `http_proxy/https_proxy`, без `--noproxy` запросы к `10.8.2.x`
+могут уходить в прокси и давать `503`, хотя сеть libvirt и VM исправны.
 
 ## Troubleshooting
 
@@ -159,49 +162,65 @@ sudo ./manage setup-vms
 `setup-network` теперь принимает обязательный аргумент:
 
 ```bash
-sudo ./manage setup-network --nat-mode <none|nat44|natmvp>
+sudo ./manage setup-network --nat-mode <none|nat44|nat_fo>
 ```
 
 Поддерживаются режимы:
 - `none` — NAT в VPP не используется;
 - `nat44` — используется дефолтный VPP NAT44;
-- `natmvp` — используется кастомный плагин `natmvp`.
+- `nat_fo` — используется кастомный плагин `nat_fo`.
 
 Что делает команда автоматически:
-- обновляет в `/etc/vpp/startup.conf` управляемый блок плагинов (`nat_plugin.so` / `natmvp_plugin.so`);
+- обновляет в `/etc/vpp/startup.conf` управляемый блок плагинов (`nat_plugin.so` / `nat_fo_plugin.so`);
 - перезапускает VPP;
 - поднимает VPP-сетевую топологию (vhost + bridge/BVI);
 - применяет runtime-конфигурацию выбранного NAT-режима.
 
-### `natmvp` режим
+### `nat_fo` режим
 
 ```bash
-sudo ./manage setup-network --nat-mode natmvp
+sudo ./manage setup-network --nat-mode nat_fo
 ```
 
 Автоматически применяются команды:
-- `natmvp set public-addr 10.8.0.1`
-- `natmvp set port-range 20000 40000`
-- `natmvp interface inside <BVI>`
-- `natmvp interface outside <external-vhost>`
+- `nat_fo set public-addr 10.8.0.1`
+- `nat_fo set port-range 20000 40000`
+- `nat_fo interface inside <BVI>`
+- `nat_fo interface outside <external-vhost>`
 
 Проверка:
 
 ```bash
-sudo vppctl show natmvp
+sudo vppctl show nat_fo
 ```
 
-Если при `setup-network --nat-mode natmvp` видно `unknown input 'natmvp ...'`, это означает, что в системном VPP нет `natmvp_plugin.so` (или он не загрузился после рестарта).  
+#### CLI `nat_fo` (быстрый справочник)
+
+```bash
+# Общий статус плагина (public addr, портовый диапазон, live/total сессии)
+sudo vppctl show nat_fo
+
+# Очистить все текущие NAT-сессии
+sudo vppctl nat_fo clear sessions
+
+# Проверить, что плагин загружен
+sudo vppctl show plugins | grep nat_fo
+```
+
+Что важно: в текущей реализации `nat_fo` CLI показывает агрегированную статистику (`live/total`),  
+отдельной команды для детального списка каждой сессии пока нет.
+
+Если при `setup-network --nat-mode nat_fo` видно `unknown input 'nat_fo ...'`, это означает, что в системном VPP нет `nat_fo_plugin.so` (или он не загрузился после рестарта).  
 Проверьте и переустановите пакеты VPP из этого репозитория:
 
 ```bash
-ls /usr/lib/x86_64-linux-gnu/vpp_plugins/natmvp_plugin.so
+ls /usr/lib/x86_64-linux-gnu/vpp_plugins/nat_fo_plugin.so
 
 cd vpp
 sudo make pkg-deb-debug
 sudo dpkg -i build-root/*.deb
 sudo systemctl restart vpp
-sudo vppctl show plugins | grep natmvp
+sudo vppctl show plugins | grep nat_fo
 ```
 
 ### `nat44` режим
@@ -242,7 +261,7 @@ sudo ./manage stop-vms
 sudo ./manage clean-network
 
 # 3) Поднять сеть с нужным NAT-режимом
-sudo ./manage setup-network --nat-mode <none|nat44|natmvp>
+sudo ./manage setup-network --nat-mode <none|nat44|nat_fo>
 
 # 4) Снова запустить VM
 sudo ./manage setup-vms
@@ -255,13 +274,13 @@ sudo ./manage setup-vms
 Для автоматизации полного цикла используйте:
 
 ```bash
-sudo ./switch_nat_mode.py <none|nat44|natmvp>
+sudo ./switch_nat_mode.py <none|nat44|nat_fo>
 ```
 
 Скрипт выполняет шаги по порядку:
 - `./manage stop-vms`
 - `./manage clean-network`
-- если выбран `natmvp`: `cd vpp && make pkg-deb-debug`, затем `dpkg -i build-root/*.deb`
+- если выбран `nat_fo`: `cd vpp && make pkg-deb-debug`, затем `dpkg -i build-root/*.deb`
 - `./manage setup-network --nat-mode <mode>`
 - `./manage setup-vms`
 - healthcheck: для каждой VM polling `http://<vm-libvirt-ip>:7000/` (раз в 1 сек, до 2 минут) до `HTTP 200`

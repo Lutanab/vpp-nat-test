@@ -12,9 +12,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class ReflectorHandler(BaseHTTPRequestHandler):
     server_version = "l34-reflector/1.0"
 
+    def _log_incoming_packet(
+        self,
+        timestamp_utc: str,
+        src_ip: str,
+        src_port: int,
+        dst_ip: str,
+        dst_port: int,
+    ) -> None:
+        print(
+            f'{timestamp_utc} incoming_packet src={src_ip}:{src_port} dst={dst_ip}:{dst_port} '
+            f'method="{self.command}" path="{self.path}"',
+            flush=True,
+        )
+
     def _send_reflection(self) -> None:
         src_ip, src_port = self.client_address
         dst_ip, dst_port = self.connection.getsockname()[:2]
+        timestamp_utc = datetime.now(timezone.utc).isoformat()
+
+        self._log_incoming_packet(timestamp_utc, src_ip, src_port, dst_ip, dst_port)
 
         payload = {
             "method": self.command,
@@ -23,7 +40,7 @@ class ReflectorHandler(BaseHTTPRequestHandler):
             "src_port": src_port,
             "dst_ip": dst_ip,
             "dst_port": dst_port,
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "timestamp_utc": timestamp_utc,
         }
         body = json.dumps(payload, ensure_ascii=True, indent=2) + "\n"
         encoded = body.encode("utf-8")
@@ -57,9 +74,9 @@ class ReflectorHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self._send_reflection()
 
-    def log_message(self, fmt: str, *args: object) -> None:
-        # Keep logs concise and useful for debugging NAT translations.
-        print(f"[{self.log_date_time_string()}] {self.client_address[0]}:{self.client_address[1]} {fmt % args}")
+    def log_message(self, _fmt: str, *_args: object) -> None:
+        # Incoming packet logging is handled explicitly in _send_reflection.
+        return
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,11 +91,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     with ThreadingHTTPServer((args.host, args.port), ReflectorHandler) as httpd:
-        print(f"l34_reflector listening on http://{args.host}:{args.port}")
+        print(f"l34_reflector listening on http://{args.host}:{args.port}", flush=True)
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
-            print("\nStopped")
+            print("\nStopped", flush=True)
 
 
 if __name__ == "__main__":

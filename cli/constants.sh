@@ -84,6 +84,6 @@ export VPP_BVI_CIDR="24"
 
 # Константы для автоматической NAT-конфигурации setup-network
 export NAT44_MAX_SESSIONS="10000"
-export NATMVP_PUBLIC_ADDR="$EXTERNAL_VPP_IP"
-export NATMVP_PORT_RANGE_START="20000"
-export NATMVP_PORT_RANGE_END="40000"
+export NAT_FO_PUBLIC_ADDR="$EXTERNAL_VPP_IP"
+export NAT_FO_PORT_RANGE_START="20000"
+export NAT_FO_PORT_RANGE_END="40000"

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-VALID_NAT_MODES = ("none", "nat44", "natmvp")
+VALID_NAT_MODES = ("none", "nat44", "nat_fo")
 HEALTHCHECK_PORT = 7000
 HEALTHCHECK_TIMEOUT_SECONDS = 120
 HEALTHCHECK_INTERVAL_SECONDS = 1
@@ -58,7 +58,7 @@ def rebuild_vpp_packages(project_root: Path) -> None:
     if not vpp_dir.is_dir():
         raise FileNotFoundError(f"Не найдена директория VPP: {vpp_dir}")
 
-    print("\n=== natmvp выбран: пересборка и переустановка VPP пакетов ===")
+    print("\n=== nat_fo выбран: пересборка и переустановка VPP пакетов ===")
     run_command(with_privileges(["make", "pkg-deb-debug"]), cwd=vpp_dir)
 
     deb_packages = sorted(build_root.glob("*.deb"))
@@ -107,8 +107,11 @@ done
 def probe_vm_http_200(target: VmHealthTarget) -> tuple[bool, str]:
     url = f"http://{target.ip}:{HEALTHCHECK_PORT}/"
     req = urllib.request.Request(url=url, method="GET")
+    # Healthchecks for libvirt-managed VM addresses must not be sent through
+    # user/system HTTP(S) proxy settings, otherwise responses can be false 503.
+    no_proxy_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(req, timeout=1.0) as response:
+        with no_proxy_opener.open(req, timeout=1.0) as response:
             status = response.getcode()
             return status == 200, f"HTTP {status}"
     except urllib.error.HTTPError as err:
@@ -164,10 +167,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Переключение NAT режима с полным циклом: stop-vms -> clean-network "
-            "-> [rebuild для natmvp] -> setup-network -> setup-vms."
+            "-> [rebuild для nat_fo] -> setup-network -> setup-vms."
         )
     )
-    parser.add_argument("nat_mode", choices=VALID_NAT_MODES, help="none | nat44 | natmvp")
+    parser.add_argument("nat_mode", choices=VALID_NAT_MODES, help="none | nat44 | nat_fo")
     return parser.parse_args()
 
 
@@ -182,7 +185,7 @@ def main() -> int:
     run_command(with_privileges([str(manage_path), "stop-vms"]), cwd=project_root)
     run_command(with_privileges([str(manage_path), "clean-network"]), cwd=project_root)
 
-    if nat_mode == "natmvp":
+    if nat_mode == "nat_fo":
         rebuild_vpp_packages(project_root)
 
     run_command(

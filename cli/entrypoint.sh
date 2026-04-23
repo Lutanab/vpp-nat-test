@@ -29,7 +29,7 @@ show_help() {
 
 Команды:
     prepare          Подготовка окружения (установка зависимостей, QEMU, настройка libvirt)
-    setup-network    Подготовка сетевой топологии (обязательно: --nat-mode <none|nat44|natmvp>)
+    setup-network    Подготовка сетевой топологии (обязательно: --nat-mode <none|nat44|nat_fo>)
     setup-vms        Подготовка и запуск всех ВМ
     stop-vms         Остановка всех ВМ
     clean-network    Очистка сетевой топологии и vhost сокетов

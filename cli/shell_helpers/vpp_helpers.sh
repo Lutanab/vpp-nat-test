@@ -314,20 +314,20 @@ prepare_vpp_network() {
 configure_vpp_nat_plugins_for_mode() {
     local nat_mode="$1"
     local startup_conf="/etc/vpp/startup.conf"
-    local natmvp_plugin_state=""
+    local nat_fo_plugin_state=""
     local nat44_plugin_state=""
 
     case "$nat_mode" in
         none)
-            natmvp_plugin_state="disable"
+            nat_fo_plugin_state="disable"
             nat44_plugin_state="disable"
             ;;
         nat44)
-            natmvp_plugin_state="disable"
+            nat_fo_plugin_state="disable"
             nat44_plugin_state="enable"
             ;;
-        natmvp)
-            natmvp_plugin_state="enable"
+        nat_fo)
+            nat_fo_plugin_state="enable"
             nat44_plugin_state="disable"
             ;;
         *)
@@ -362,7 +362,7 @@ configure_vpp_nat_plugins_for_mode() {
 
     # Убираем любые существующие живые строки настройки nat-плагинов, чтобы избежать дубликатов
     sed -E \
-        -e '/^[[:space:]]*plugin[[:space:]]+natmvp_plugin\.so[[:space:]]*\{.*\}[[:space:]]*$/d' \
+        -e '/^[[:space:]]*plugin[[:space:]]+nat_fo_plugin\.so[[:space:]]*\{.*\}[[:space:]]*$/d' \
         -e '/^[[:space:]]*plugin[[:space:]]+nat_plugin\.so[[:space:]]*\{.*\}[[:space:]]*$/d' \
         "$tmp_without_block" > "$tmp_final"
 
@@ -370,7 +370,7 @@ configure_vpp_nat_plugins_for_mode() {
 
 # BEGIN VPP_NAT_TEST_MANAGED_PLUGINS
 plugins {
-  plugin natmvp_plugin.so { $natmvp_plugin_state }
+  plugin nat_fo_plugin.so { $nat_fo_plugin_state }
   plugin nat_plugin.so { $nat44_plugin_state }
 }
 # END VPP_NAT_TEST_MANAGED_PLUGINS
@@ -381,7 +381,7 @@ EOF
     rm -f "$tmp_original" "$tmp_without_block" "$tmp_final"
 
     echo "  ✓ Обновлён $startup_conf"
-    echo "    - natmvp_plugin.so: $natmvp_plugin_state"
+    echo "    - nat_fo_plugin.so: $nat_fo_plugin_state"
     echo "    - nat_plugin.so: $nat44_plugin_state"
     echo ""
 }
@@ -413,16 +413,16 @@ run_vppctl_command_or_fail() {
     fi
 }
 
-ensure_natmvp_runtime_available_or_fail() {
+ensure_nat_fo_runtime_available_or_fail() {
     local plugin_path=""
     local plugins_output=""
     local probe_output=""
 
     # Проверяем, что плагин действительно установлен в системе.
-    plugin_path="$(find /usr/lib -maxdepth 4 -type f -name natmvp_plugin.so 2>/dev/null | head -n 1)"
+    plugin_path="$(find /usr/lib -maxdepth 4 -type f -name nat_fo_plugin.so 2>/dev/null | head -n 1)"
     if [ -z "$plugin_path" ]; then
-        echo "  ✗ NATMVP plugin не найден в системе (natmvp_plugin.so)"
-        echo "    Похоже, VPP установлен из пакетов без natmvp."
+        echo "  ✗ NAT_FO plugin не найден в системе (nat_fo_plugin.so)"
+        echo "    Похоже, VPP установлен из пакетов без nat_fo."
         echo "    Пересоберите и переустановите пакеты из этого репозитория:"
         echo "      cd vpp"
         echo "      sudo make pkg-deb-debug"
@@ -437,18 +437,18 @@ ensure_natmvp_runtime_available_or_fail() {
         exit 1
     fi
 
-    if ! echo "$plugins_output" | grep -q "natmvp_plugin.so"; then
-        echo "  ✗ VPP не загрузил natmvp_plugin.so (несмотря на nat-mode=natmvp)"
+    if ! echo "$plugins_output" | grep -q "nat_fo_plugin.so"; then
+        echo "  ✗ VPP не загрузил nat_fo_plugin.so (несмотря на nat-mode=nat_fo)"
         echo "    Проверьте /etc/vpp/startup.conf и перезапустите VPP:"
         echo "      sudo systemctl restart vpp"
-        echo "      sudo vppctl show plugins | grep natmvp"
+        echo "      sudo vppctl show plugins | grep nat_fo"
         exit 1
     fi
 
-    # Финальная проверка: команда CLI natmvp должна распознаваться.
-    probe_output="$(vppctl show natmvp 2>&1 || true)"
+    # Финальная проверка: команда CLI nat_fo должна распознаваться.
+    probe_output="$(vppctl show nat_fo 2>&1 || true)"
     if echo "$probe_output" | grep -Eiq 'unknown input|unknown command|parse error'; then
-        echo "  ✗ CLI 'natmvp' недоступен в VPP"
+        echo "  ✗ CLI 'nat_fo' недоступен в VPP"
         echo "$probe_output" | sed 's/^/    /'
         exit 1
     fi
@@ -476,13 +476,13 @@ configure_vpp_nat_runtime_mode() {
             run_vppctl_command_or_fail "Внешний NAT44 адрес привязан к интерфейсу ${outside_iface}" "nat44 add interface address ${outside_iface}"
             run_vppctl_command_or_fail "NAT44 summary" "show nat44 summary"
             ;;
-        natmvp)
-            ensure_natmvp_runtime_available_or_fail
-            run_vppctl_command_or_fail "NATMVP public address установлен (${NATMVP_PUBLIC_ADDR})" "natmvp set public-addr ${NATMVP_PUBLIC_ADDR}"
-            run_vppctl_command_or_fail "NATMVP диапазон портов установлен (${NATMVP_PORT_RANGE_START}-${NATMVP_PORT_RANGE_END})" "natmvp set port-range ${NATMVP_PORT_RANGE_START} ${NATMVP_PORT_RANGE_END}"
-            run_vppctl_command_or_fail "NATMVP inside интерфейс установлен (${inside_iface})" "natmvp interface inside ${inside_iface}"
-            run_vppctl_command_or_fail "NATMVP outside интерфейс установлен (${outside_iface})" "natmvp interface outside ${outside_iface}"
-            run_vppctl_command_or_fail "NATMVP summary" "show natmvp"
+        nat_fo)
+            ensure_nat_fo_runtime_available_or_fail
+            run_vppctl_command_or_fail "NAT_FO public address установлен (${NAT_FO_PUBLIC_ADDR})" "nat_fo set public-addr ${NAT_FO_PUBLIC_ADDR}"
+            run_vppctl_command_or_fail "NAT_FO диапазон портов установлен (${NAT_FO_PORT_RANGE_START}-${NAT_FO_PORT_RANGE_END})" "nat_fo set port-range ${NAT_FO_PORT_RANGE_START} ${NAT_FO_PORT_RANGE_END}"
+            run_vppctl_command_or_fail "NAT_FO inside интерфейс установлен (${inside_iface})" "nat_fo interface inside ${inside_iface}"
+            run_vppctl_command_or_fail "NAT_FO outside интерфейс установлен (${outside_iface})" "nat_fo interface outside ${outside_iface}"
+            run_vppctl_command_or_fail "NAT_FO summary" "show nat_fo"
             ;;
         *)
             echo "  ✗ Ошибка: неподдерживаемый nat-mode '$nat_mode'"
