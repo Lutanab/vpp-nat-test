@@ -203,12 +203,22 @@ sudo vppctl show nat_fo
 # Очистить все текущие NAT-сессии
 sudo vppctl nat_fo clear sessions
 
+# Очистить runtime-сессии и durable session store в shmem
+sudo vppctl nat_fo shm clear
+
+# Полностью пересоздать shm-сегмент для чистого теста recovery
+sudo vppctl nat_fo shm unlink
+
 # Проверить, что плагин загружен
 sudo vppctl show plugins | grep nat_fo
 ```
 
 Что важно: в текущей реализации `nat_fo` CLI показывает агрегированную статистику (`live/total`),  
 отдельной команды для детального списка каждой сессии пока нет.
+
+`show nat_fo` теперь также показывает состояние `shmem`: путь сегмента, число слотов,
+а также сколько сессий было восстановлено и сколько было отброшено как протухшие
+при последнем recovery после старта VPP.
 
 Если при `setup-network --nat-mode nat_fo` видно `unknown input 'nat_fo ...'`, это означает, что в системном VPP нет `nat_fo_plugin.so` (или он не загрузился после рестарта).  
 Проверьте и переустановите пакеты VPP из этого репозитория:
