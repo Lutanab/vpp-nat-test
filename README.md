@@ -279,15 +279,27 @@ sudo ./manage setup-vms
 
 Это снижает риск «залипших» vhost-сокетов и рассинхронизации между VPP и уже запущенными VM.
 
-### Автоматическое переключение NAT через Python-скрипт
+### Автоматическое переключение NAT через CLI
 
-Для автоматизации полного цикла используйте:
+Сначала подготовьте workspace:
 
 ```bash
-sudo ./switch_nat_mode.py <none|nat44|nat_fo>
+uv sync
 ```
 
-Скрипт выполняет шаги по порядку:
+Показать текущий режим:
+
+```bash
+uv run manage_nat show
+```
+
+Переключить режим:
+
+```bash
+uv run manage_nat switch <none|nat44|nat_fo>
+```
+
+CLI выполняет шаги по порядку:
 - `./manage stop-vms`
 - `./manage clean-network`
 - если выбран `nat_fo`: `cd vpp && make pkg-deb-debug`, затем `dpkg -i build-root/*.deb`

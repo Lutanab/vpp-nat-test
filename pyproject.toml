@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vpp-nat-test"
+version = "0.1.0"
+description = "Workspace tools for the VPP NAT test repository"
+requires-python = ">=3.11"
+dependencies = [
+  "rich-click>=1.8.6",
+  "test-nat",
+  "nat-loadtest-server",
+]
+
+[project.scripts]
+manage-nat = "manage_nat.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.workspace]
+members = [
+  "testing",
+  "virtual_machines/host_mounts/external_vm/nat_loadtest_server",
+]
+
+[tool.uv.sources]
+test-nat = { workspace = true }
+nat-loadtest-server = { workspace = true }

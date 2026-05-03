@@ -1,10 +1,5 @@
-#!/usr/bin/env python3
-
-"""Automate full NAT mode switch workflow for this project."""
-
 from __future__ import annotations
 
-import argparse
 import os
 import shlex
 import subprocess
@@ -17,7 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-VALID_NAT_MODES = ("none", "nat44", "nat_fo")
+import rich_click as click
+
+from ._nat_mode import STARTUP_CONF_PATH, VALID_NAT_MODES, parse_managed_nat_mode
+
 HEALTHCHECK_PORT = 7000
 HEALTHCHECK_TIMEOUT_SECONDS = 120
 HEALTHCHECK_INTERVAL_SECONDS = 1
@@ -38,16 +36,16 @@ def with_privileges(command: Sequence[str]) -> list[str]:
 def run_command(command: Sequence[str], cwd: Path | None = None) -> None:
     rendered = shlex.join(command)
     if cwd is not None:
-        print(f"\n==> {rendered} (cwd: {cwd})")
+        click.echo(f"\n==> {rendered} (cwd: {cwd})")
     else:
-        print(f"\n==> {rendered}")
+        click.echo(f"\n==> {rendered}")
     subprocess.run(command, cwd=str(cwd) if cwd else None, check=True)
 
 
 def ensure_manage_exists(project_root: Path) -> Path:
     manage_path = (project_root / "manage").resolve()
     if not manage_path.exists():
-        raise FileNotFoundError(f"Не найден manage-скрипт: {manage_path}")
+        raise FileNotFoundError(f"Manage script not found: {manage_path}")
     return manage_path
 
 
@@ -56,14 +54,14 @@ def rebuild_vpp_packages(project_root: Path) -> None:
     build_root = vpp_dir / "build-root"
 
     if not vpp_dir.is_dir():
-        raise FileNotFoundError(f"Не найдена директория VPP: {vpp_dir}")
+        raise FileNotFoundError(f"VPP directory not found: {vpp_dir}")
 
-    print("\n=== nat_fo выбран: пересборка и переустановка VPP пакетов ===")
+    click.echo("\n=== nat_fo selected: rebuilding and reinstalling VPP packages ===")
     run_command(with_privileges(["make", "pkg-deb-debug"]), cwd=vpp_dir)
 
     deb_packages = sorted(build_root.glob("*.deb"))
     if not deb_packages:
-        raise RuntimeError(f"После сборки не найдены пакеты .deb в {build_root}")
+        raise RuntimeError(f"No .deb packages found in {build_root} after build")
 
     run_command(with_privileges(["dpkg", "-i", *[str(pkg) for pkg in deb_packages]]))
 
@@ -91,33 +89,29 @@ done
         if not line:
             continue
         if ":" not in line:
-            raise RuntimeError(f"Некорректная строка VM health target: '{line}'")
+            raise RuntimeError(f"Malformed VM health target line: '{line}'")
         name, ip = line.split(":", 1)
-        name = name.strip()
-        ip = ip.strip()
-        if not name or not ip:
-            raise RuntimeError(f"Некорректный target VM: '{line}'")
-        targets.append(VmHealthTarget(name=name, ip=ip))
+        if not name.strip() or not ip.strip():
+            raise RuntimeError(f"Malformed VM health target: '{line}'")
+        targets.append(VmHealthTarget(name=name.strip(), ip=ip.strip()))
 
     if not targets:
-        raise RuntimeError("Не удалось определить VM для healthcheck из cli/constants.sh")
+        raise RuntimeError("Failed to discover VM health targets from cli/constants.sh")
     return targets
 
 
 def probe_vm_http_200(target: VmHealthTarget) -> tuple[bool, str]:
     url = f"http://{target.ip}:{HEALTHCHECK_PORT}/"
-    req = urllib.request.Request(url=url, method="GET")
-    # Healthchecks for libvirt-managed VM addresses must not be sent through
-    # user/system HTTP(S) proxy settings, otherwise responses can be false 503.
-    no_proxy_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(url=url, method="GET")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with no_proxy_opener.open(req, timeout=1.0) as response:
+        with opener.open(request, timeout=1.0) as response:
             status = response.getcode()
             return status == 200, f"HTTP {status}"
-    except urllib.error.HTTPError as err:
-        return False, f"HTTP {err.code}"
-    except Exception as err:
-        return False, err.__class__.__name__
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}"
+    except Exception as exc:
+        return False, exc.__class__.__name__
 
 
 def run_vms_healthcheck(project_root: Path) -> None:
@@ -125,9 +119,9 @@ def run_vms_healthcheck(project_root: Path) -> None:
     pending: dict[str, VmHealthTarget] = {target.name: target for target in targets}
     deadline = time.monotonic() + HEALTHCHECK_TIMEOUT_SECONDS
 
-    print("\n=== Healthcheck VM сервисов (порт 7000) ===")
+    click.echo("\n=== VM healthcheck (port 7000) ===")
     for target in targets:
-        print(f"  - {target.name}: http://{target.ip}:{HEALTHCHECK_PORT}/")
+        click.echo(f"  - {target.name}: http://{target.ip}:{HEALTHCHECK_PORT}/")
 
     with ThreadPoolExecutor(max_workers=len(targets)) as pool:
         while pending and time.monotonic() < deadline:
@@ -142,7 +136,10 @@ def run_vms_healthcheck(project_root: Path) -> None:
                 if ok:
                     elapsed = int(time.monotonic() - (deadline - HEALTHCHECK_TIMEOUT_SECONDS))
                     target = pending.pop(name)
-                    print(f"  ✓ {target.name} ({target.ip}:{HEALTHCHECK_PORT}) готов [{elapsed}s, {detail}]")
+                    click.echo(
+                        f"  ✓ {target.name} ({target.ip}:{HEALTHCHECK_PORT}) ready "
+                        f"[{elapsed}s, {detail}]"
+                    )
 
             if not pending:
                 break
@@ -157,30 +154,54 @@ def run_vms_healthcheck(project_root: Path) -> None:
             f"{target.name}({target.ip}:{HEALTHCHECK_PORT})" for target in pending.values()
         )
         raise RuntimeError(
-            f"Healthcheck timeout {HEALTHCHECK_TIMEOUT_SECONDS}s. Не дождались HTTP 200 от: {pending_names}"
+            f"Healthcheck timeout {HEALTHCHECK_TIMEOUT_SECONDS}s. Missing HTTP 200 from: {pending_names}"
         )
 
-    print("  ✓ Healthcheck пройден для всех VM")
+    click.echo("  ✓ Healthcheck passed for all VMs")
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Переключение NAT режима с полным циклом: stop-vms -> clean-network "
-            "-> [rebuild для nat_fo] -> setup-network -> setup-vms."
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+def app() -> None:
+    """Manage the repository NAT mode workflow."""
+
+
+@app.command("show")
+@click.option(
+    "--startup-conf",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=STARTUP_CONF_PATH,
+    show_default=True,
+    help="Path to the VPP startup.conf file with the managed NAT block.",
+)
+def show_command(startup_conf: Path) -> None:
+    """Show the currently configured NAT mode."""
+    current_mode = parse_managed_nat_mode(startup_conf_path=startup_conf)
+    if current_mode is None:
+        raise click.ClickException(
+            f"Failed to detect the current NAT mode from {startup_conf}. "
+            "The managed VPP plugin block may be missing."
         )
-    )
-    parser.add_argument("nat_mode", choices=VALID_NAT_MODES, help="none | nat44 | nat_fo")
-    return parser.parse_args()
+    click.echo(current_mode)
 
 
-def main() -> int:
-    args = parse_args()
-    project_root = Path(__file__).resolve().parent
+@app.command("switch")
+@click.argument("nat_mode", type=click.Choice(VALID_NAT_MODES))
+@click.option(
+    "--project-root",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path(__file__).resolve().parents[2],
+    show_default=False,
+    help="Repository root. Intended for advanced use and testing.",
+)
+def switch_command(nat_mode: str, project_root: Path) -> None:
+    """Switch NAT mode with the full stop/clean/setup/start workflow."""
     manage_path = ensure_manage_exists(project_root)
-    nat_mode = args.nat_mode
 
-    print(f"=== Переключение NAT режима: {nat_mode} ===")
+    click.echo(f"=== Switching NAT mode to: {nat_mode} ===")
+
+    current_mode = parse_managed_nat_mode()
+    if current_mode is not None:
+        click.echo(f"Current managed NAT mode: {current_mode}")
 
     run_command(with_privileges([str(manage_path), "stop-vms"]), cwd=project_root)
     run_command(with_privileges([str(manage_path), "clean-network"]), cwd=project_root)
@@ -195,16 +216,26 @@ def main() -> int:
     run_command(with_privileges([str(manage_path), "setup-vms"]), cwd=project_root)
     run_vms_healthcheck(project_root)
 
-    print("\n✓ NAT режим успешно переключён и VM запущены")
-    return 0
+    click.echo("\n✓ NAT mode successfully switched and VMs are up")
+
+
+def main() -> int:
+    try:
+        app.main(standalone_mode=False)
+        return 0
+    except click.ClickException as exc:
+        exc.show()
+        return exc.exit_code
+    except subprocess.CalledProcessError as exc:
+        click.echo(f"\nCommand failed with exit code {exc.returncode}", err=True)
+        return exc.returncode
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
+        click.echo(f"\nError: {exc}", err=True)
+        return 1
+    except click.Abort:
+        click.echo("Aborted", err=True)
+        return 1
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except subprocess.CalledProcessError as exc:
-        print(f"\n✗ Команда завершилась ошибкой (код {exc.returncode})", file=sys.stderr)
-        raise SystemExit(exc.returncode)
-    except (FileNotFoundError, RuntimeError) as exc:
-        print(f"\n✗ {exc}", file=sys.stderr)
-        raise SystemExit(1)
+    sys.exit(main())
