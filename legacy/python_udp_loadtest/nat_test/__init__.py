@@ -1,4 +1,4 @@
-"""User VM NAT benchmark worker."""
+"""Simple and load NAT test toolkit."""
 
 __all__ = ["__version__"]
 

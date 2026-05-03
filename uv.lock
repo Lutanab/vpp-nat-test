@@ -4,8 +4,7 @@ requires-python = ">=3.11"
 
 [manifest]
 members = [
-    "nat-loadtest-server",
-    "test-nat",
+    "test-nat-worker",
     "vpp-nat-test",
 ]
 
@@ -52,17 +51,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nat-loadtest-server"
-version = "0.1.0"
-source = { editable = "virtual_machines/host_mounts/external_vm/nat_loadtest_server" }
-dependencies = [
-    { name = "rich-click" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "rich-click", specifier = ">=1.8.6" }]
-
-[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -99,7 +87,7 @@ wheels = [
 ]
 
 [[package]]
-name = "test-nat"
+name = "test-nat-worker"
 version = "0.1.0"
 source = { editable = "testing" }
 dependencies = [
@@ -114,14 +102,12 @@ name = "vpp-nat-test"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "nat-loadtest-server" },
     { name = "rich-click" },
-    { name = "test-nat" },
+    { name = "test-nat-worker" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "nat-loadtest-server", editable = "virtual_machines/host_mounts/external_vm/nat_loadtest_server" },
     { name = "rich-click", specifier = ">=1.8.6" },
-    { name = "test-nat", editable = "testing" },
+    { name = "test-nat-worker", editable = "testing" },
 ]

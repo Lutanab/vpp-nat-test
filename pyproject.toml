@@ -9,8 +9,7 @@ description = "Workspace tools for the VPP NAT test repository"
 requires-python = ">=3.11"
 dependencies = [
   "rich-click>=1.8.6",
-  "test-nat",
-  "nat-loadtest-server",
+  "test-nat-worker",
 ]
 
 [project.scripts]
@@ -25,9 +24,7 @@ where = ["src"]
 [tool.uv.workspace]
 members = [
   "testing",
-  "virtual_machines/host_mounts/external_vm/nat_loadtest_server",
 ]
 
 [tool.uv.sources]
-test-nat = { workspace = true }
-nat-loadtest-server = { workspace = true }
+test-nat-worker = { workspace = true }

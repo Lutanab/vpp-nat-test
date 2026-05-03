@@ -8,8 +8,6 @@ virtual_machines/host_mounts/user_vm_1/testing/.venv/
 virtual_machines/host_mounts/user_vm_1/testing/results/
 virtual_machines/host_mounts/user_vm_1/testing/configs/test_config.yaml
 virtual_machines/host_mounts/user_vm_1/testing/src/*.egg-info/
-virtual_machines/host_mounts/external_vm/nat_loadtest_server/.venv/
-virtual_machines/host_mounts/external_vm/nat_loadtest_server/src/*.egg-info/
 .venv
 
 *.egg-info

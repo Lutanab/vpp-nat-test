@@ -1,6 +1,10 @@
-# Testing
+# User VM Test Worker
 
-Каталог физически расположен в `virtual_machines/host_mounts/user_vm_1/testing`, а путь `./testing` в корне репозитория является симлинком на этот host mount.
+Каталог физически расположен в `virtual_machines/host_mounts/user_vm_1/testing`, а путь
+`./testing` в корне репозитория является симлинком на этот host mount.
+
+Этот пакет теперь является worker-частью для `user_vm_1`. Host будет оркестрировать
+NAT/VPP, а внутри VM будет вызываться только `test-nat-worker`.
 
 ## Установка
 
@@ -8,126 +12,64 @@
 uv sync
 ```
 
-После этого из корня репозитория доступна команда:
+Проверка CLI:
 
 ```bash
-uv run test-nat --help
-uv run nat-loadtest-server --help
+uv run test-nat-worker --help
 ```
 
-## Simple
+## Simple Test
 
-Проверка базовой связности и NAT:
+Старый `simple_test.py` сохранен и доступен так:
 
 ```bash
-uv run test-nat simple
+uv run test-nat-worker simple-test
 ```
 
-Ручные sanity-check адресов:
+## Run Step
 
-- `external-vm`: `curl --noproxy '*' http://10.8.0.2:8080/test`
-- `user-vm-2`: `curl --noproxy '*' http://10.8.1.3:8080/test`
+`run-step` запускает одну ступеньку через `sockperf under-load`.
+Все параметры передаются явно, без VM-local `test_config.yaml`.
 
-## Load
-
-Конфиг для нагрузочных тестов:
-
-```text
-testing/configs/test_config.yaml
-```
-
-Шаблон:
-
-```text
-testing/configs/test_config.yaml.template
-```
-
-Стартовая заготовка:
+Пример:
 
 ```bash
-cp testing/configs/test_config.yaml.template testing/configs/test_config.yaml
+uv run test-nat-worker run-step \
+  --target-pps 100000 \
+  --packet-size 512 \
+  --n-flows 1 \
+  --warmup-sec 10 \
+  --measurement-sec 60 \
+  --server-ip 10.8.0.2 \
+  --server-port-base 5001 \
+  --reply-every 100
 ```
 
-В шаблоне оставлены только параметры, которые описывают сам эксперимент.
-Топологические значения и служебные defaults захардкожены в коде:
+`stdout` содержит итоговый JSON. Прогресс пишется в `stderr`.
 
-- `server_ip=10.8.0.2`
-- `server_port=9000`
-- `server_mode=echo`
-- `bind_ip=0.0.0.0`
-- `base_src_port=20000`
-- `results_root=testing/results`
+В JSON есть ключевые timestamp-и:
 
-Если нужно, их всё ещё можно переопределить CLI-флагами.
+- `warmup_started_at`
+- `measurement_started_at`
+- `measurement_finished_at`
 
-Параметры search/run профиля вынесены в presets:
+## Presets
+
+Presets пока остаются на VM в:
 
 ```text
 testing/presets/search/
 ```
 
-Сейчас первый пресет:
+Но `run-step` их не читает сам: host-side orchestration будет выбирать preset и
+передавать worker-у уже развернутые параметры.
+
+## Legacy
+
+Старый Python UDP loadtest-код вынесен за пределы host mount в:
 
 ```text
-testing/presets/search/standart.yaml
+legacy/python_udp_loadtest/
 ```
 
-В основном конфиге указывается только:
-
-```yaml
-search_preset: standart
-```
-
-`nat_mode` в YAML больше не хранится. Его нужно передавать вручную при запуске
-`run`, а `test-nat` внутри VM просто использует это значение
-как метку текущего режима для результатов.
-
-Именно имя пресета затем фигурирует в именах result-директорий как `search_preset_<name>`,
-вместо отдельных wildcard-сегментов для `warmup`, `measurement_duration` и `pps_precision_delta`.
-
-Серверная часть теперь вынесена в отдельный пакет на стороне `external_vm`:
-
-```bash
-uv run nat-loadtest-server run l34-udp --port 9000 --mode echo
-uv run nat-loadtest-server status
-```
-
-Для постоянного запуска на `external_vm` лучше поднимать его как `systemd`-сервис.
-Шаблон лежит в [nat_loadtest_server.service](/home/zero/projects/vpp-nat-test/virtual_machines/host_mounts/external_vm/nat_loadtest_server/nat_loadtest_server.service),
-инструкция в [server README](/home/zero/projects/vpp-nat-test/virtual_machines/host_mounts/external_vm/nat_loadtest_server/README.md).
-
-Клиентские команды:
-
-```bash
-uv run test-nat load run --nat-mode nat44
-```
-
-Пример с override:
-
-```bash
-uv run test-nat load run \
-  --nat-mode nat44 \
-  --max-pps 2000000
-```
-
-Без `--nat-mode` load-команды не запускаются.
-
-Во время `run` прогресс печатается в `stderr`,
-а итоговый JSON остаётся в `stdout`.
-
-Для `run` результаты теперь складываются в три файла:
-
-- `program.log` с полным логом работы поиска
-- `history.json` с полной историей всех ступенек
-- `result.json` только с конечным итогом поиска
-
-`run` использует warmup на каждой ступеньке отдельно. Это сделано затем,
-чтобы каждая точка измерялась после выхода именно на свой уровень PPS, а не зависела
-от переходных эффектов предыдущей ступеньки.
-
-Относительные пути внутри YAML резолвятся относительно директории, где лежит сам конфиг.
-
-Важно по режимам сервера:
-
-- для `run` нужен `echo`
-- `sink` сейчас скорее вспомогательный receive-only режим
+Он не является текущим worker-API, но сохранен для повторного использования.

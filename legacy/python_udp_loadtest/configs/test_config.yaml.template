@@ -1,0 +1,4 @@
+search_preset: standart
+packet_size_bytes: 512
+flow_count: 10000
+loss_threshold: 0.0001
