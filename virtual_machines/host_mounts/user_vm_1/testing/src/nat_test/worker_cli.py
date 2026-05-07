@@ -247,7 +247,7 @@ def run_sockperf_phase(
 ) -> list[FlowRun]:
     processes: list[tuple[int, int, int, list[str], subprocess.Popen[str]]] = []
     for flow_index, target_mps in enumerate(flow_mps):
-        server_port = server_port_base + flow_index
+        server_port = server_port_base
         command = [
             sockperf_bin,
             "under-load",

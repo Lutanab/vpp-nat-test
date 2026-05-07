@@ -2,12 +2,6 @@ version = 1
 revision = 3
 requires-python = ">=3.11"
 
-[manifest]
-members = [
-    "test-nat-worker",
-    "vpp-nat-test",
-]
-
 [[package]]
 name = "click"
 version = "8.3.3"
@@ -87,27 +81,12 @@ wheels = [
 ]
 
 [[package]]
-name = "test-nat-worker"
+name = "vpp-nat-test"
 version = "0.1.0"
-source = { editable = "testing" }
+source = { editable = "." }
 dependencies = [
     { name = "rich-click" },
 ]
 
 [package.metadata]
 requires-dist = [{ name = "rich-click", specifier = ">=1.8.6" }]
-
-[[package]]
-name = "vpp-nat-test"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "rich-click" },
-    { name = "test-nat-worker" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "rich-click", specifier = ">=1.8.6" },
-    { name = "test-nat-worker", editable = "testing" },
-]

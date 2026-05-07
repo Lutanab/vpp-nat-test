@@ -106,6 +106,56 @@ sudo systemctl status vpp-libvirt-port-forward.service
 sudo iptables -t nat -S PREROUTING | grep -E "8022|8122|8222"
 ```
 
+## SSH доступ к VM через virbr0
+
+Если команда вида `ssh zero@10.8.2.10` отвечает `Permission denied (publickey)`,
+значит VM принимает только SSH-ключи, а публичный ключ хоста еще не добавлен в
+`authorized_keys` пользователя `zero`. Парольный SSH в cloud-init отключен
+параметром `ssh_pwauth: false`, поэтому `ssh-copy-id` в такой ситуации не
+поможет.
+
+Сначала подготовьте публичный ключ на хосте и положите его в host mount каждой
+VM:
+
+```bash
+test -f ~/.ssh/id_ed25519.pub || ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+
+cp ~/.ssh/id_ed25519.pub virtual_machines/host_mounts/external_vm/host_id_ed25519.pub
+cp ~/.ssh/id_ed25519.pub virtual_machines/host_mounts/user_vm_1/host_id_ed25519.pub
+cp ~/.ssh/id_ed25519.pub virtual_machines/host_mounts/user_vm_2/host_id_ed25519.pub
+```
+
+Затем зайдите в нужную VM. Например, через serial console:
+
+```bash
+sudo socat -,raw,echo=0 unix-connect:/var/run/vpp/console/vpp-external-machine.sock
+```
+
+Внутри VM добавьте ключ:
+
+```bash
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+cat /mnt/host/host_id_ed25519.pub >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+```
+
+После этого с хоста можно подключаться напрямую через `virbr0`-IP:
+
+```bash
+ssh zero@10.8.2.10  # external_vm
+ssh zero@10.8.2.11  # user_vm_1
+ssh zero@10.8.2.12  # user_vm_2
+```
+
+Если VM была пересоздана и SSH ругается на host key, удалите старый ключ:
+
+```bash
+ssh-keygen -R 10.8.2.10
+ssh-keygen -R 10.8.2.11
+ssh-keygen -R 10.8.2.12
+```
+
 ## Проверка статуса виртуальных машин
 
 ```bash

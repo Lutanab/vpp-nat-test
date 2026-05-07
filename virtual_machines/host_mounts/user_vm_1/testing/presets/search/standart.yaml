@@ -1,6 +1,5 @@
-warmup_duration_sec: 10
-measurement_duration_sec: 60
-run_once_pps: 100000
+warmup_sec: 10
+measurement_sec: 60
 search_initial_pps: 100000
 search_max_pps: 10000000
-search_pps_precision_delta: 10000
+search_relative_precision: 0.05

@@ -9,22 +9,14 @@ description = "Workspace tools for the VPP NAT test repository"
 requires-python = ">=3.11"
 dependencies = [
   "rich-click>=1.8.6",
-  "test-nat-worker",
 ]
 
 [project.scripts]
 manage-nat = "manage_nat.cli:main"
+test-nat = "test_nat.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.uv.workspace]
-members = [
-  "testing",
-]
-
-[tool.uv.sources]
-test-nat-worker = { workspace = true }
