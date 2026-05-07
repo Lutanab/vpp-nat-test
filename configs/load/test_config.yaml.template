@@ -1,5 +1,4 @@
 nat_mode: nat_fo
-search_preset: standart
 packet_size: 512
-n_flows: 1
+n_flows: 10
 target_loss_rate: 0.0001

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import rich_click as click
 
-from .config import HostTestConfig, load_host_config
+from .config import HostTestConfig, load_test_configs
 from .runner import BoundarySearchError, run_load_search
 
 
@@ -22,16 +22,30 @@ def load_group() -> None:
 
 @load_group.command("run")
 @click.option(
+    "--load-config",
     "--config",
     type=click.Path(path_type=Path, dir_okay=False),
-    help="Path to host-side YAML config. Defaults to configs/test_config.yaml.",
+    help="Path to load YAML config. Defaults to configs/load/test_config.yaml.",
 )
-def load_run_command(config: Path | None) -> None:
-    """Load config and run the host-side boundary search."""
-    resolved_config, preset, config_path = load_host_config(config)
+@click.option(
+    "--search-config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Path to search YAML config. Defaults to configs/search/test_config.yaml.",
+)
+def load_run_command(
+    load_config: Path | None,
+    search_config: Path | None,
+) -> None:
+    """Load configs and run the host-side boundary search."""
+    resolved_config, search, load_config_path, search_config_path = load_test_configs(load_config, search_config)
     reset_known_hosts_for_test_vms(resolved_config)
     try:
-        run_load_search(resolved_config, preset, config_path)
+        run_load_search(
+            resolved_config,
+            search,
+            load_config_path,
+            search_config_path,
+        )
     except BoundarySearchError as exc:
         raise click.ClickException(str(exc)) from exc
 

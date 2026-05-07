@@ -127,6 +127,12 @@ def run_step(
     )
 
     flow_mps = split_rate(target_pps, n_flows)
+    log(
+        "Распределение нагрузки: "
+        f"total_mps={target_pps}, flows={n_flows}, "
+        f"mps_per_flow={min(flow_mps)}..{max(flow_mps)}, "
+        f"server={server_ip}:{server_port_base}, reply_every={reply_every}"
+    )
     warmup_runs: list[FlowRun] = []
     if warmup_sec > 0:
         log("Запуск warmup-фазы")
@@ -160,7 +166,12 @@ def run_step(
     measurement_finished_at = utc_now_iso()
 
     failed_flows = [flow for flow in measurement_runs if flow.returncode != 0]
-    aggregate = aggregate_measurement(measurement_runs, target_pps=target_pps, duration_sec=measurement_sec)
+    aggregate = aggregate_measurement(
+        measurement_runs,
+        target_pps=target_pps,
+        duration_sec=measurement_sec,
+        reply_every=reply_every,
+    )
     status = "ok" if not failed_flows else "sockperf_failed"
     result = {
         "status": status,
@@ -189,7 +200,8 @@ def run_step(
     log(
         "Measurement завершен: "
         f"status={status}, sent_packets={aggregate['sent_packets']}, "
-        f"received_packets={aggregate['received_packets']}, loss_rate={aggregate['loss_rate']}"
+        f"received_replies={aggregate['received_replies']}, "
+        f"dropped_packets={aggregate['dropped_packets']}, loss_rate={aggregate['loss_rate']}"
     )
     return result
 
@@ -215,8 +227,8 @@ def validate_run_step_args(
         raise ValueError("--warmup-sec must be non-negative")
     if measurement_sec <= 0:
         raise ValueError("--measurement-sec must be positive")
-    if server_port_base <= 0 or server_port_base + n_flows - 1 > 65535:
-        raise ValueError("server port range is outside 1..65535")
+    if server_port_base <= 0 or server_port_base > 65535:
+        raise ValueError("server port is outside 1..65535")
     if reply_every <= 0:
         raise ValueError("--reply-every must be positive")
 
@@ -246,6 +258,11 @@ def run_sockperf_phase(
     log: Any,
 ) -> list[FlowRun]:
     processes: list[tuple[int, int, int, list[str], subprocess.Popen[str]]] = []
+    log(
+        f"{phase}: запуск {len(flow_mps)} flow, duration_sec={duration_sec}, "
+        f"server_port={server_port_base}, total_mps={sum(flow_mps)}, "
+        f"mps_per_flow={min(flow_mps)}..{max(flow_mps)}"
+    )
     for flow_index, target_mps in enumerate(flow_mps):
         server_port = server_port_base
         command = [
@@ -264,7 +281,6 @@ def run_sockperf_phase(
             "--reply-every",
             str(reply_every),
         ]
-        log(f"{phase}: flow={flow_index}, port={server_port}, mps={target_mps}")
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         processes.append((flow_index, server_port, target_mps, command, process))
 
@@ -284,7 +300,15 @@ def run_sockperf_phase(
             parsed=parsed,
         )
         results.append(flow)
-        log(f"{phase}: flow={flow_index} завершен с кодом {process.returncode}")
+    successful_flows = sum(1 for flow in results if flow.returncode == 0)
+    failed_flow_indexes = [flow.flow_index for flow in results if flow.returncode != 0]
+    if failed_flow_indexes:
+        log(
+            f"{phase}: завершено {successful_flows}/{len(results)} flow успешно, "
+            f"failed_flows={failed_flow_indexes}"
+        )
+    else:
+        log(f"{phase}: завершено {successful_flows}/{len(results)} flow успешно")
     return results
 
 
@@ -311,18 +335,6 @@ def parse_sockperf_output(output: str) -> dict[str, Any]:
         "out_of_order_packets": [
             r"(?:out.of.order|out of order)[^0-9\n]*(\d+)",
         ],
-        "latency_avg": [
-            r"(?:avg|average)[^0-9\n]*(\d+(?:\.\d+)?)",
-        ],
-        "latency_p50": [
-            r"(?:percentile\s*50(?:\.0+)?|p50)[^0-9\n]*(\d+(?:\.\d+)?)",
-        ],
-        "latency_p95": [
-            r"(?:percentile\s*95(?:\.0+)?|p95)[^0-9\n]*(\d+(?:\.\d+)?)",
-        ],
-        "latency_p99": [
-            r"(?:percentile\s*99(?:\.0+)?|p99)[^0-9\n]*(\d+(?:\.\d+)?)",
-        ],
     }
     for field, field_patterns in patterns.items():
         for pattern in field_patterns:
@@ -332,10 +344,65 @@ def parse_sockperf_output(output: str) -> dict[str, Any]:
             value = match.group(1)
             parsed[field] = float(value) if "." in value else int(value)
             break
+
+    latency_avg = parse_latency_average_usec(output)
+    if latency_avg is not None:
+        parsed["latency_avg_usec"] = latency_avg
+
+    percentiles = parse_latency_percentiles_usec(output)
+    if percentiles:
+        parsed["latency_percentiles_usec"] = percentiles
+    for percentile, field in (("50", "latency_p50_usec"), ("95", "latency_p95_usec"), ("99", "latency_p99_usec")):
+        if percentile in percentiles:
+            parsed[field] = percentiles[percentile]
     return parsed
 
 
-def aggregate_measurement(flows: list[FlowRun], target_pps: int, duration_sec: int) -> dict[str, Any]:
+def parse_latency_average_usec(output: str) -> float | None:
+    import re
+
+    patterns = [
+        r"Summary:\s*Latency\s+is\s+([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]+)?",
+        r"avg-lat=\s*([0-9]+(?:\.[0-9]+)?)\s*(?:\([^)]*\))?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, output, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        unit = match.group(2) if len(match.groups()) >= 2 else "usec"
+        return normalize_latency_to_usec(float(match.group(1)), unit)
+    return None
+
+
+def parse_latency_percentiles_usec(output: str) -> dict[str, float]:
+    import re
+
+    percentiles: dict[str, float] = {}
+    for match in re.finditer(r"percentile\s+([0-9]+(?:\.[0-9]+)?)\s*=\s*([0-9]+(?:\.[0-9]+)?)", output, re.I):
+        percentile = normalize_percentile_key(match.group(1))
+        percentiles[percentile] = float(match.group(2))
+    return percentiles
+
+
+def normalize_percentile_key(raw: str) -> str:
+    value = float(raw)
+    if value.is_integer():
+        return str(int(value))
+    return raw.rstrip("0").rstrip(".")
+
+
+def normalize_latency_to_usec(value: float, unit: str | None) -> float:
+    normalized_unit = (unit or "usec").lower()
+    if normalized_unit in {"usec", "usecs", "us"}:
+        return value
+    if normalized_unit in {"msec", "msecs", "ms"}:
+        return value * 1_000
+    if normalized_unit in {"sec", "secs", "s"}:
+        return value * 1_000_000
+    return value
+
+
+def aggregate_measurement(flows: list[FlowRun], target_pps: int, duration_sec: int, reply_every: int) -> dict[str, Any]:
     expected_sent = target_pps * duration_sec
     sent_values = [flow.parsed.get("sent_packets") for flow in flows]
     received_values = [flow.parsed.get("received_packets") for flow in flows]
@@ -344,40 +411,48 @@ def aggregate_measurement(flows: list[FlowRun], target_pps: int, duration_sec: i
     sent_packets = sum_ints(sent_values)
     if sent_packets is None:
         sent_packets = expected_sent
-    received_packets = sum_ints(received_values)
+    received_replies = sum_ints(received_values)
     dropped_packets = sum_ints(dropped_values)
-    if dropped_packets is None and sent_packets is not None and received_packets is not None:
-        dropped_packets = max(sent_packets - received_packets, 0)
+    loss_source = "sockperf_dropped_counter" if dropped_packets is not None else None
+    if dropped_packets is None and reply_every == 1 and sent_packets is not None and received_replies is not None:
+        dropped_packets = max(sent_packets - received_replies, 0)
+        loss_source = "sent_minus_received_replies"
 
     loss_rate = None
     if sent_packets and dropped_packets is not None:
         loss_rate = dropped_packets / sent_packets
 
-    latency = aggregate_latency(flows)
+    latency = aggregate_latency_usec(flows)
     actual_sent_pps = sent_packets / duration_sec if sent_packets is not None else None
+    expected_replies = sent_packets // reply_every if sent_packets is not None else None
     return {
         "target_pps": target_pps,
         "actual_sent_pps": round(actual_sent_pps, 4) if actual_sent_pps is not None else None,
         "sent_packets": sent_packets,
-        "received_packets": received_packets,
+        "received_packets": received_replies,
+        "received_replies": received_replies,
+        "expected_replies": expected_replies,
+        "reply_every": reply_every,
         "dropped_packets": dropped_packets,
         "loss_rate": round(loss_rate, 9) if loss_rate is not None else None,
+        "loss_source": loss_source,
         "duplicated_packets": sum_ints(flow.parsed.get("duplicated_packets") for flow in flows),
         "out_of_order_packets": sum_ints(flow.parsed.get("out_of_order_packets") for flow in flows),
-        "latency_rtt": latency,
+        "latency_rtt_usec": latency,
     }
 
 
-def aggregate_latency(flows: list[FlowRun]) -> dict[str, float | None]:
-    result: dict[str, float | None] = {}
+def aggregate_latency_usec(flows: list[FlowRun]) -> dict[str, float]:
+    result: dict[str, float] = {}
     for source, target in (
-        ("latency_avg", "avg"),
-        ("latency_p50", "p50"),
-        ("latency_p95", "p95"),
-        ("latency_p99", "p99"),
+        ("latency_avg_usec", "avg"),
+        ("latency_p50_usec", "p50"),
+        ("latency_p95_usec", "p95"),
+        ("latency_p99_usec", "p99"),
     ):
         values = [flow.parsed[source] for flow in flows if source in flow.parsed]
-        result[target] = round(mean(values), 6) if values else None
+        if values:
+            result[target] = round(mean(values), 6)
     return result
 
 
@@ -386,8 +461,8 @@ def build_warnings(flows: list[FlowRun], aggregate: dict[str, Any], target_pps: 
     failed = [flow.flow_index for flow in flows if flow.returncode != 0]
     if failed:
         warnings.append(f"sockperf failed for flows: {failed}")
-    if aggregate["received_packets"] is None and aggregate["dropped_packets"] is None:
-        warnings.append("sockperf output parser did not find received/dropped counters")
+    if aggregate["dropped_packets"] is None:
+        warnings.append("sockperf output parser did not find dropped/lost counter; loss_rate is unknown")
     actual_sent_pps = aggregate["actual_sent_pps"]
     if actual_sent_pps is not None and abs(actual_sent_pps - target_pps) / target_pps > 0.05:
         warnings.append("actual_sent_pps differs from target_pps by more than 5%")

@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "test_config.yaml"
-DEFAULT_CONFIG_TEMPLATE_PATH = PROJECT_ROOT / "configs" / "test_config.yaml.template"
-DEFAULT_SEARCH_PRESET_DIR = PROJECT_ROOT / "virtual_machines" / "host_mounts" / "user_vm_1" / "testing" / "presets" / "search"
+DEFAULT_LOAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "load" / "test_config.yaml"
+DEFAULT_LOAD_CONFIG_TEMPLATE_PATH = PROJECT_ROOT / "configs" / "load" / "test_config.yaml.template"
+DEFAULT_SEARCH_CONFIG_PATH = PROJECT_ROOT / "configs" / "search" / "test_config.yaml"
+DEFAULT_SEARCH_CONFIG_TEMPLATE_PATH = PROJECT_ROOT / "configs" / "search" / "test_config.yaml.template"
 DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "results"
-DEFAULT_SEARCH_PRESET = "standart"
 DEFAULT_USER_VM_SSH_TARGET = "zero@10.8.2.11"
 DEFAULT_USER_VM_SSH_PORT = 22
 DEFAULT_USER_VM_TESTING_DIR = "/mnt/host/testing"
@@ -28,8 +28,7 @@ VALID_NAT_MODES = ("none", "nat44", "nat_fo")
 
 
 @dataclass(slots=True)
-class SearchPreset:
-    name: str
+class SearchConfig:
     warmup_sec: int
     measurement_sec: int
     search_initial_pps: int
@@ -43,7 +42,6 @@ class SearchPreset:
 @dataclass(slots=True)
 class HostTestConfig:
     nat_mode: str
-    search_preset: str
     packet_size: int
     n_flows: int
     target_loss_rate: float
@@ -67,24 +65,32 @@ class HostTestConfig:
         return payload
 
 
-def load_host_config(config_path: Path | None) -> tuple[HostTestConfig, SearchPreset, Path]:
-    resolved_config_path = config_path or DEFAULT_CONFIG_PATH
-    if not resolved_config_path.exists():
+def load_test_configs(
+    load_config_path: Path | None,
+    search_config_path: Path | None,
+) -> tuple[HostTestConfig, SearchConfig, Path, Path]:
+    resolved_load_config_path = load_config_path or DEFAULT_LOAD_CONFIG_PATH
+    resolved_search_config_path = search_config_path or DEFAULT_SEARCH_CONFIG_PATH
+
+    if not resolved_load_config_path.exists():
         raise FileNotFoundError(
-            f"Config file not found: {resolved_config_path}. "
-            f"Start from template: {DEFAULT_CONFIG_TEMPLATE_PATH}"
+            f"Load config file not found: {resolved_load_config_path}. "
+            f"Start from template: {DEFAULT_LOAD_CONFIG_TEMPLATE_PATH}"
+        )
+    if not resolved_search_config_path.exists():
+        raise FileNotFoundError(
+            f"Search config file not found: {resolved_search_config_path}. "
+            f"Start from template: {DEFAULT_SEARCH_CONFIG_TEMPLATE_PATH}"
         )
 
-    raw_config = load_simple_yaml(resolved_config_path)
-    search_preset_name = str(raw_config.get("search_preset", DEFAULT_SEARCH_PRESET))
-    preset = load_search_preset(search_preset_name)
+    raw_load_config = load_simple_yaml(resolved_load_config_path)
+    raw_search_config = load_simple_yaml(resolved_search_config_path)
 
     config = HostTestConfig(
-        nat_mode=ensure_valid_nat_mode(str(require(raw_config, "nat_mode"))),
-        search_preset=search_preset_name,
-        packet_size=int(require(raw_config, "packet_size")),
-        n_flows=int(require(raw_config, "n_flows")),
-        target_loss_rate=float(require(raw_config, "target_loss_rate")),
+        nat_mode=ensure_valid_nat_mode(str(require(raw_load_config, "nat_mode"))),
+        packet_size=int(require(raw_load_config, "packet_size")),
+        n_flows=int(require(raw_load_config, "n_flows")),
+        target_loss_rate=float(require(raw_load_config, "target_loss_rate")),
         user_vm_ssh_target=DEFAULT_USER_VM_SSH_TARGET,
         user_vm_ssh_port=DEFAULT_USER_VM_SSH_PORT,
         user_vm_testing_dir=DEFAULT_USER_VM_TESTING_DIR,
@@ -99,26 +105,18 @@ def load_host_config(config_path: Path | None) -> tuple[HostTestConfig, SearchPr
         results_root=DEFAULT_RESULTS_ROOT,
         test_name=DEFAULT_TEST_NAME,
     )
-    validate_config(config, preset)
-    return config, preset, resolved_config_path
-
-
-def load_search_preset(name: str) -> SearchPreset:
-    path = DEFAULT_SEARCH_PRESET_DIR / f"{name}.yaml"
-    if not path.exists():
-        raise FileNotFoundError(f"Search preset not found: {path}")
-    raw = load_simple_yaml(path)
-    return SearchPreset(
-        name=name,
-        warmup_sec=int(require(raw, "warmup_sec")),
-        measurement_sec=int(require(raw, "measurement_sec")),
-        search_initial_pps=int(require(raw, "search_initial_pps")),
-        search_max_pps=int(require(raw, "search_max_pps")),
-        search_relative_precision=float(require(raw, "search_relative_precision")),
+    search = SearchConfig(
+        warmup_sec=int(require(raw_search_config, "warmup_sec")),
+        measurement_sec=int(require(raw_search_config, "measurement_sec")),
+        search_initial_pps=int(require(raw_search_config, "search_initial_pps")),
+        search_max_pps=int(require(raw_search_config, "search_max_pps")),
+        search_relative_precision=float(require(raw_search_config, "search_relative_precision")),
     )
+    validate_config(config, search)
+    return config, search, resolved_load_config_path, resolved_search_config_path
 
 
-def validate_config(config: HostTestConfig, preset: SearchPreset) -> None:
+def validate_config(config: HostTestConfig, search: SearchConfig) -> None:
     if config.packet_size <= 0:
         raise ValueError("packet_size must be positive")
     if config.n_flows <= 0:
@@ -129,19 +127,22 @@ def validate_config(config: HostTestConfig, preset: SearchPreset) -> None:
         raise ValueError("reply_every must be positive")
     if config.scrape_interval_sec <= 0:
         raise ValueError("scrape_interval_sec must be positive")
-    if preset.search_initial_pps <= 0 or preset.search_max_pps <= 0:
+    if search.warmup_sec < 0:
+        raise ValueError("warmup_sec must be non-negative")
+    if search.measurement_sec <= 0:
+        raise ValueError("measurement_sec must be positive")
+    if search.search_initial_pps <= 0 or search.search_max_pps <= 0:
         raise ValueError("search PPS values must be positive")
-    if preset.search_initial_pps > preset.search_max_pps:
+    if search.search_initial_pps > search.search_max_pps:
         raise ValueError("search_initial_pps must be <= search_max_pps")
-    if preset.search_relative_precision <= 0:
+    if search.search_relative_precision <= 0:
         raise ValueError("search_relative_precision must be positive")
 
 
-def build_results_dir(config: HostTestConfig, preset: SearchPreset) -> Path:
+def build_results_dir(config: HostTestConfig) -> Path:
     segments = (
         ("test_name", config.test_name),
         ("target_loss_rate", config.target_loss_rate),
-        ("search_preset", preset.name),
         ("packet_size", config.packet_size),
         ("n_flows", config.n_flows),
         ("nat_mode", config.nat_mode),

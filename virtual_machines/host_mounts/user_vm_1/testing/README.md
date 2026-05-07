@@ -1,7 +1,6 @@
 # User VM Test Worker
 
-Каталог физически расположен в `virtual_machines/host_mounts/user_vm_1/testing`, а путь
-`./testing` в корне репозитория является симлинком на этот host mount.
+Каталог физически расположен в `virtual_machines/host_mounts/user_vm_1/testing`.
 
 Этот пакет теперь является worker-частью для `user_vm_1`. Host будет оркестрировать
 NAT/VPP, а внутри VM будет вызываться только `test-nat-worker`.
@@ -53,16 +52,16 @@ uv run test-nat-worker run-step \
 - `measurement_started_at`
 - `measurement_finished_at`
 
-## Presets
+## Host Configs
 
-Presets пока остаются на VM в:
+Параметры поиска теперь живут на host side:
 
 ```text
-testing/presets/search/
+configs/search/
 ```
 
-Но `run-step` их не читает сам: host-side orchestration будет выбирать preset и
-передавать worker-у уже развернутые параметры.
+`run-step` конфиги не читает сам: host-side orchestration передает worker-у уже
+развернутые параметры `--warmup-sec` и `--measurement-sec`.
 
 ## Legacy
 

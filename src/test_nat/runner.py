@@ -6,15 +6,15 @@ import signal
 import subprocess
 import sys
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
 from manage_nat._nat_mode import parse_managed_nat_mode
 
-from .config import HostTestConfig, SearchPreset, build_results_dir
-from .results import RunLogger, ensure_directory, parse_utc_iso, utc_now_iso, write_json
+from .config import HostTestConfig, SearchConfig, build_results_dir
+from .results import RunLogger, ensure_directory, parse_utc_iso, write_json
 
 LOG_FILE_NAME = "program.log"
 HISTORY_FILE_NAME = "history.json"
@@ -51,20 +51,24 @@ class StepRecord:
     worker_result: dict[str, Any]
     vpp_resources: dict[str, Any]
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
-
-def run_load_search(config: HostTestConfig, preset: SearchPreset, config_path: Path) -> dict[str, Any]:
-    results_dir = build_results_dir(config, preset)
-    ensure_directory(results_dir)
+def run_load_search(
+    config: HostTestConfig,
+    search: SearchConfig,
+    load_config_path: Path,
+    search_config_path: Path,
+) -> dict[str, Any]:
+    results_dir = build_results_dir(config)
+    reset_results_dir(results_dir)
     logger = RunLogger(results_dir / LOG_FILE_NAME)
 
     logger(
         "Старт нагрузочного теста: "
-        f"config={config_path}, results_dir={results_dir}, nat_mode={config.nat_mode}, "
-        f"search_preset={preset.name}, packet_size={config.packet_size}, n_flows={config.n_flows}, "
-        f"loss_threshold={config.target_loss_rate}"
+        f"load_config={load_config_path}, search_config={search_config_path}, "
+        f"results_dir={results_dir}, nat_mode={config.nat_mode}, "
+        f"packet_size={config.packet_size}, n_flows={config.n_flows}, "
+        f"loss_threshold={config.target_loss_rate}, warmup_sec={search.warmup_sec}, "
+        f"measurement_sec={search.measurement_sec}"
     )
     logger(
         "Стратегия warmup: warmup выполняется на каждой ступеньке. "
@@ -74,12 +78,23 @@ def run_load_search(config: HostTestConfig, preset: SearchPreset, config_path: P
     try:
         ensure_nat_mode(config.nat_mode, logger)
         ensure_external_sockperf_server(config, logger)
-        return run_boundary_search(config=config, preset=preset, results_dir=results_dir, logger=logger)
+        return run_boundary_search(
+            config=config,
+            search=search,
+            results_dir=results_dir,
+            logger=logger,
+        )
     except BoundarySearchError:
         raise
     except Exception as exc:
         logger(f"Тест завершен с ошибкой: {exc}")
         raise
+
+
+def reset_results_dir(results_dir: Path) -> None:
+    ensure_directory(results_dir)
+    for file_name in (LOG_FILE_NAME, HISTORY_FILE_NAME, RESULT_FILE_NAME):
+        (results_dir / file_name).unlink(missing_ok=True)
 
 
 def ensure_external_sockperf_server(config: HostTestConfig, logger: RunLogger) -> None:
@@ -124,23 +139,22 @@ def ensure_nat_mode(target_mode: str, logger: RunLogger) -> None:
 
 def run_boundary_search(
     config: HostTestConfig,
-    preset: SearchPreset,
+    search: SearchConfig,
     results_dir: Path,
     logger: RunLogger,
 ) -> dict[str, Any]:
-    initial_pps = preset.search_initial_pps
-    max_pps = preset.search_max_pps
-    precision_delta = max(1, int(initial_pps * preset.search_relative_precision))
+    initial_pps = search.search_initial_pps
+    max_pps = search.search_max_pps
+    precision_delta = max(1, int(initial_pps * search.search_relative_precision))
 
     logger(
         "Параметры поиска: "
         f"search_initial_pps={initial_pps}, search_max_pps={max_pps}, "
-        f"search_relative_precision={preset.search_relative_precision}, "
+        f"search_relative_precision={search.search_relative_precision}, "
         f"search_pps_precision_delta={precision_delta}"
     )
 
     steps: list[StepRecord] = []
-    started_at = utc_now_iso()
     step_index = 0
 
     def execute_step(phase: str, target_pps: int) -> StepRecord:
@@ -149,7 +163,7 @@ def run_boundary_search(
         logger(f"Запуск ступеньки #{step_index}: phase={phase_label(phase)}, target_pps={target_pps}")
         step = run_and_measure_step(
             config=config,
-            preset=preset,
+            search=search,
             phase=phase,
             step_index=step_index,
             target_pps=target_pps,
@@ -173,19 +187,10 @@ def run_boundary_search(
         )
         payload = build_history_payload(
             config=config,
-            preset=preset,
+            search=search,
             precision_delta=precision_delta,
-            status="initial_pps_above_threshold",
-            message=message,
-            recommendations=[
-                "Уменьшите search_initial_pps в search preset.",
-                "Либо увеличьте target_loss_rate, если такой уровень потерь допустим.",
-            ],
             steps=steps,
-            left_step=None,
-            right_step=left_step,
-            results_dir=results_dir,
-            started_at=started_at,
+            final_step=None,
         )
         persist_payloads(payload, results_dir, logger)
         raise BoundarySearchError(message)
@@ -212,19 +217,10 @@ def run_boundary_search(
         )
         payload = build_history_payload(
             config=config,
-            preset=preset,
+            search=search,
             precision_delta=precision_delta,
-            status="upper_bound_not_found",
-            message=message,
-            recommendations=[
-                "Увеличьте search_max_pps в search preset.",
-                "Либо сделайте target_loss_rate строже, если границу нужно искать раньше.",
-            ],
             steps=steps,
-            left_step=current_left,
-            right_step=None,
-            results_dir=results_dir,
-            started_at=started_at,
+            final_step=current_left,
         )
         persist_payloads(payload, results_dir, logger)
         raise BoundarySearchError(message)
@@ -250,16 +246,10 @@ def run_boundary_search(
     )
     payload = build_history_payload(
         config=config,
-        preset=preset,
+        search=search,
         precision_delta=precision_delta,
-        status="boundary_found",
-        message=message,
-        recommendations=[],
         steps=steps,
-        left_step=current_left,
-        right_step=right_step,
-        results_dir=results_dir,
-        started_at=started_at,
+        final_step=current_left,
     )
     persist_payloads(payload, results_dir, logger)
     logger(
@@ -271,7 +261,7 @@ def run_boundary_search(
 
 def run_and_measure_step(
     config: HostTestConfig,
-    preset: SearchPreset,
+    search: SearchConfig,
     phase: str,
     step_index: int,
     target_pps: int,
@@ -285,7 +275,7 @@ def run_and_measure_step(
     worker_result: dict[str, Any]
     try:
         try:
-            worker_result = run_worker_step(config=config, preset=preset, target_pps=target_pps, logger=logger)
+            worker_result = run_worker_step(config=config, search=search, target_pps=target_pps, logger=logger)
         finally:
             stop_vpp_scraper(scraper, logger)
         resources = summarize_vpp_scrape(scrape_path, worker_result.get("timestamps", {}))
@@ -353,7 +343,7 @@ def stop_vpp_scraper(process: subprocess.Popen[str], logger: RunLogger) -> None:
 
 def run_worker_step(
     config: HostTestConfig,
-    preset: SearchPreset,
+    search: SearchConfig,
     target_pps: int,
     logger: RunLogger,
 ) -> dict[str, Any]:
@@ -370,9 +360,9 @@ def run_worker_step(
         "--n-flows",
         str(config.n_flows),
         "--warmup-sec",
-        str(preset.warmup_sec),
+        str(search.warmup_sec),
         "--measurement-sec",
-        str(preset.measurement_sec),
+        str(search.measurement_sec),
         "--server-ip",
         config.server_ip,
         "--server-port-base",
@@ -418,25 +408,25 @@ def summarize_vpp_scrape(scrape_path: Path, timestamps: dict[str, Any]) -> dict[
         return {
             "status": "not_enough_samples",
             "sample_count": len(valid_samples),
-            "cpu_percent_avg": None,
-            "cpu_percent_max": None,
+            "cpu_cores_avg": None,
+            "cpu_cores_max": None,
             "memory_current_bytes_avg": None,
             "memory_current_bytes_max": None,
             "warnings": errors,
         }
 
-    cpu_percents: list[float] = []
+    cpu_cores: list[float] = []
     for previous, current in zip(valid_samples, valid_samples[1:]):
         wall_delta = float(current["epoch"]) - float(previous["epoch"])
         cpu_delta = int(current["cpu_usage_usec"]) - int(previous["cpu_usage_usec"])
         if wall_delta > 0:
-            cpu_percents.append(max(0.0, cpu_delta / 1_000_000 / wall_delta * 100.0))
+            cpu_cores.append(max(0.0, cpu_delta / 1_000_000 / wall_delta))
     memory_values = [int(sample["memory_current_bytes"]) for sample in valid_samples]
     return {
         "status": "ok",
         "sample_count": len(valid_samples),
-        "cpu_percent_avg": round(mean(cpu_percents), 4) if cpu_percents else None,
-        "cpu_percent_max": round(max(cpu_percents), 4) if cpu_percents else None,
+        "cpu_cores_avg": round(mean(cpu_cores), 6) if cpu_cores else None,
+        "cpu_cores_max": round(max(cpu_cores), 6) if cpu_cores else None,
         "memory_current_bytes_avg": int(round(mean(memory_values))),
         "memory_current_bytes_max": max(memory_values),
         "warnings": errors,
@@ -459,82 +449,87 @@ def read_scrape_samples(scrape_path: Path) -> list[dict[str, Any]]:
 
 def build_history_payload(
     config: HostTestConfig,
-    preset: SearchPreset,
+    search: SearchConfig,
     precision_delta: int,
-    status: str,
-    message: str,
-    recommendations: list[str],
     steps: list[StepRecord],
-    left_step: StepRecord | None,
-    right_step: StepRecord | None,
-    results_dir: Path,
-    started_at: str,
+    final_step: StepRecord | None,
 ) -> dict[str, Any]:
     return {
-        "status": status,
-        "message": message,
-        "recommendations": recommendations,
-        "search": {
-            "test_name": config.test_name,
+        "params": build_params(config, search, precision_delta),
+        "result": [build_step_result(step) for step in steps],
+        "_final_result": build_final_step_result(final_step),
+    }
+
+
+def build_params(config: HostTestConfig, search: SearchConfig, precision_delta: int) -> dict[str, Any]:
+    return {
+        "load_params": {
             "nat_mode": config.nat_mode,
             "packet_size": config.packet_size,
             "n_flows": config.n_flows,
             "target_loss_rate": config.target_loss_rate,
-            "search_preset": preset.name,
-            "search_initial_pps": preset.search_initial_pps,
-            "search_max_pps": preset.search_max_pps,
-            "search_relative_precision": preset.search_relative_precision,
+        },
+        "search_params": {
+            "warmup_sec": search.warmup_sec,
+            "measurement_sec": search.measurement_sec,
+            "search_initial_pps": search.search_initial_pps,
+            "search_max_pps": search.search_max_pps,
+            "search_relative_precision": search.search_relative_precision,
             "search_pps_precision_delta": precision_delta,
             "warmup_strategy": WARMUP_STRATEGY,
-            "server_ip": config.server_ip,
-            "server_port": config.server_port_base,
-            "results_dir": str(results_dir),
-            "log_file": str(results_dir / LOG_FILE_NAME),
-            "history_file": str(results_dir / HISTORY_FILE_NAME),
-            "result_file": str(results_dir / RESULT_FILE_NAME),
-        },
-        "result": {
-            "boundary_target_pps": left_step.target_pps if left_step is not None else None,
-            "boundary_actual_sent_pps": left_step.actual_sent_pps if left_step is not None else None,
-            "boundary_loss_rate": left_step.loss_rate if left_step is not None else None,
-            "boundary_latency_rtt": get_latency(left_step),
-            "boundary_vpp_resources": left_step.vpp_resources if left_step is not None else None,
-            "first_failing_target_pps": right_step.target_pps if right_step is not None else None,
-            "first_failing_actual_sent_pps": right_step.actual_sent_pps if right_step is not None else None,
-            "first_failing_loss_rate": right_step.loss_rate if right_step is not None else None,
-            "left_pps": left_step.target_pps if left_step is not None else None,
-            "right_pps": right_step.target_pps if right_step is not None else None,
-        },
-        "steps": [step.to_dict() for step in steps],
-        "timestamps": {
-            "started_at": started_at,
-            "finished_at": utc_now_iso(),
         },
     }
 
 
-def get_latency(step: StepRecord | None) -> dict[str, Any] | None:
-    if step is None:
-        return None
+def build_step_result(step: StepRecord) -> dict[str, Any]:
     aggregate = step.worker_result.get("aggregate", {})
-    latency = aggregate.get("latency_rtt")
-    return latency if isinstance(latency, dict) else None
+    return {
+        "step_index": step.step_index,
+        "phase": step.phase,
+        "target_pps": step.target_pps,
+        "passed": step.passed,
+        "actual_sent_pps": step.actual_sent_pps,
+        "sent_packets": aggregate.get("sent_packets"),
+        "received_replies": aggregate.get("received_replies"),
+        "expected_replies": aggregate.get("expected_replies"),
+        "dropped_packets": aggregate.get("dropped_packets"),
+        "loss_rate": step.loss_rate,
+        "loss_source": aggregate.get("loss_source"),
+        "latency_rtt_usec": aggregate.get("latency_rtt_usec"),
+        "vpp_resources": compact_vpp_resources(step.vpp_resources),
+    }
+
+
+def build_final_step_result(step: StepRecord | None) -> dict[str, Any]:
+    if step is None:
+        return {}
+    result = build_step_result(step)
+    result.pop("step_index", None)
+    result.pop("phase", None)
+    result.pop("passed", None)
+    return result
+
+
+def compact_vpp_resources(resources: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "cpu_cores_avg": resources.get("cpu_cores_avg"),
+        "cpu_cores_max": resources.get("cpu_cores_max"),
+        "memory_current_bytes_avg": resources.get("memory_current_bytes_avg"),
+        "memory_current_bytes_max": resources.get("memory_current_bytes_max"),
+    }
 
 
 def persist_payloads(payload: dict[str, Any], results_dir: Path, logger: RunLogger) -> None:
-    write_json(results_dir / HISTORY_FILE_NAME, payload)
+    history_payload = {key: value for key, value in payload.items() if key != "_final_result"}
+    write_json(results_dir / HISTORY_FILE_NAME, history_payload)
     write_json(results_dir / RESULT_FILE_NAME, build_final_result_payload(payload))
     logger(f"Результаты сохранены: {results_dir / RESULT_FILE_NAME}, {results_dir / HISTORY_FILE_NAME}")
 
 
 def build_final_result_payload(history_payload: dict[str, Any]) -> dict[str, Any]:
     return {
-        "status": history_payload["status"],
-        "message": history_payload["message"],
-        "recommendations": history_payload["recommendations"],
-        "search": history_payload["search"],
-        "result": history_payload["result"],
-        "timestamps": history_payload["timestamps"],
+        "params": history_payload["params"],
+        "result": history_payload.get("_final_result", {}),
     }
 
 
