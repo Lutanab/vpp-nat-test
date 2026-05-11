@@ -193,7 +193,12 @@ def show_command(startup_conf: Path) -> None:
     show_default=False,
     help="Repository root. Intended for advanced use and testing.",
 )
-def switch_command(nat_mode: str, project_root: Path) -> None:
+@click.option(
+    "--restart",
+    is_flag=True,
+    help="Force the full stop/clean/rebuild/setup/start workflow even if the requested NAT mode is already configured.",
+)
+def switch_command(nat_mode: str, project_root: Path, restart: bool) -> None:
     """Switch NAT mode with the full stop/clean/setup/start workflow."""
     manage_path = ensure_manage_exists(project_root)
 
@@ -202,6 +207,11 @@ def switch_command(nat_mode: str, project_root: Path) -> None:
     current_mode = parse_managed_nat_mode()
     if current_mode is not None:
         click.echo(f"Current managed NAT mode: {current_mode}")
+    if current_mode == nat_mode and not restart:
+        click.echo("\n✓ NAT mode is already configured. Use --restart to rebuild/recreate the runtime topology.")
+        return
+    if restart:
+        click.echo("Restart requested: forcing the full workflow.")
 
     run_command(with_privileges([str(manage_path), "stop-vms"]), cwd=project_root)
     run_command(with_privileges([str(manage_path), "clean-network"]), cwd=project_root)

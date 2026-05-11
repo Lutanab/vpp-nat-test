@@ -340,13 +340,20 @@ uv sync
 Показать текущий режим:
 
 ```bash
-uv run manage_nat show
+uv run manage-nat show
 ```
 
 Переключить режим:
 
 ```bash
-uv run manage_nat switch <none|nat44|nat_fo>
+uv run manage-nat switch <none|nat44|nat_fo>
+```
+
+Если режим уже записан в `startup.conf`, но нужно принудительно пересобрать `nat_fo`,
+пересоздать runtime-топологию и перезапустить VM:
+
+```bash
+uv run manage-nat switch --restart nat_fo
 ```
 
 CLI выполняет шаги по порядку:

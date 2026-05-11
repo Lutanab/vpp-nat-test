@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import runpy
 import shutil
 import subprocess
@@ -201,7 +202,7 @@ def run_step(
         "Measurement завершен: "
         f"status={status}, sent_packets={aggregate['sent_packets']}, "
         f"received_replies={aggregate['received_replies']}, "
-        f"dropped_packets={aggregate['dropped_packets']}, loss_rate={aggregate['loss_rate']}"
+        f"lost_replies={aggregate['lost_replies']}, loss_rate={aggregate['loss_rate']}"
     )
     return result
 
@@ -313,8 +314,7 @@ def run_sockperf_phase(
 
 
 def parse_sockperf_output(output: str) -> dict[str, Any]:
-    import re
-
+    output = strip_ansi(output)
     parsed: dict[str, Any] = {}
     patterns = {
         "sent_packets": [
@@ -344,6 +344,8 @@ def parse_sockperf_output(output: str) -> dict[str, Any]:
             value = match.group(1)
             parsed[field] = float(value) if "." in value else int(value)
             break
+    if re.search(r"No\s+messages\s+were\s+received\s+from\s+the\s+server", output, flags=re.IGNORECASE):
+        parsed["received_packets"] = 0
 
     latency_avg = parse_latency_average_usec(output)
     if latency_avg is not None:
@@ -356,6 +358,10 @@ def parse_sockperf_output(output: str) -> dict[str, Any]:
         if percentile in percentiles:
             parsed[field] = percentiles[percentile]
     return parsed
+
+
+def strip_ansi(value: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", value)
 
 
 def parse_latency_average_usec(output: str) -> float | None:
@@ -412,6 +418,11 @@ def aggregate_measurement(flows: list[FlowRun], target_pps: int, duration_sec: i
     if sent_packets is None:
         sent_packets = expected_sent
     received_replies = sum_ints(received_values)
+    expected_replies = sent_packets // reply_every if sent_packets is not None else None
+    lost_replies = None
+    if expected_replies is not None and received_replies is not None:
+        lost_replies = max(expected_replies - received_replies, 0)
+
     dropped_packets = sum_ints(dropped_values)
     loss_source = "sockperf_dropped_counter" if dropped_packets is not None else None
     if dropped_packets is None and reply_every == 1 and sent_packets is not None and received_replies is not None:
@@ -419,12 +430,12 @@ def aggregate_measurement(flows: list[FlowRun], target_pps: int, duration_sec: i
         loss_source = "sent_minus_received_replies"
 
     loss_rate = None
-    if sent_packets and dropped_packets is not None:
-        loss_rate = dropped_packets / sent_packets
+    if expected_replies and lost_replies is not None:
+        loss_rate = lost_replies / expected_replies
+        loss_source = "expected_minus_received_replies"
 
     latency = aggregate_latency_usec(flows)
     actual_sent_pps = sent_packets / duration_sec if sent_packets is not None else None
-    expected_replies = sent_packets // reply_every if sent_packets is not None else None
     return {
         "target_pps": target_pps,
         "actual_sent_pps": round(actual_sent_pps, 4) if actual_sent_pps is not None else None,
@@ -432,6 +443,7 @@ def aggregate_measurement(flows: list[FlowRun], target_pps: int, duration_sec: i
         "received_packets": received_replies,
         "received_replies": received_replies,
         "expected_replies": expected_replies,
+        "lost_replies": lost_replies,
         "reply_every": reply_every,
         "dropped_packets": dropped_packets,
         "loss_rate": round(loss_rate, 9) if loss_rate is not None else None,
@@ -461,8 +473,8 @@ def build_warnings(flows: list[FlowRun], aggregate: dict[str, Any], target_pps: 
     failed = [flow.flow_index for flow in flows if flow.returncode != 0]
     if failed:
         warnings.append(f"sockperf failed for flows: {failed}")
-    if aggregate["dropped_packets"] is None:
-        warnings.append("sockperf output parser did not find dropped/lost counter; loss_rate is unknown")
+    if aggregate["received_replies"] is None:
+        warnings.append("sockperf output parser did not find received reply counter; loss_rate is unknown")
     actual_sent_pps = aggregate["actual_sent_pps"]
     if actual_sent_pps is not None and abs(actual_sent_pps - target_pps) / target_pps > 0.05:
         warnings.append("actual_sent_pps differs from target_pps by more than 5%")

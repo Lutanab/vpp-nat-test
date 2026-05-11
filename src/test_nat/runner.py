@@ -77,6 +77,7 @@ def run_load_search(
 
     try:
         ensure_nat_mode(config.nat_mode, logger)
+        ensure_runtime_topology(config, logger)
         ensure_external_sockperf_server(config, logger)
         return run_boundary_search(
             config=config,
@@ -135,6 +136,58 @@ def ensure_nat_mode(target_mode: str, logger: RunLogger) -> None:
     if result.returncode != 0:
         raise RuntimeError(f"manage-nat switch failed with code {result.returncode}")
     logger(f"NAT-режим переключен на {target_mode}")
+
+
+def ensure_runtime_topology(config: HostTestConfig, logger: RunLogger) -> None:
+    logger("Проверяем runtime-топологию VPP и тестовые IP на VM")
+    result = subprocess.run(
+        ["sudo", "vppctl", "show", "interface"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Не удалось проверить VPP-интерфейсы: {result.stderr.strip() or result.stdout.strip()}")
+    if not has_nonlocal_vpp_interface(result.stdout):
+        raise RuntimeError(
+            "VPP runtime-топология не поднята: 'show interface' содержит только local0. "
+            "startup.conf может уже указывать нужный NAT-режим, но vhost-интерфейсы исчезают после "
+            "restart/clean-network. Поднимите топологию заново: "
+            f"'uv run manage-nat switch --restart {config.nat_mode}' или "
+            f"'sudo ./manage setup-network --nat-mode {config.nat_mode} && sudo ./manage setup-vms'."
+        )
+    ensure_vm_test_ip(
+        name="external_vm",
+        ssh_target=config.external_vm_ssh_target,
+        ssh_port=config.external_vm_ssh_port,
+        ip_address=config.external_vm_test_ip,
+    )
+    ensure_vm_test_ip(
+        name="user_vm_1",
+        ssh_target=config.user_vm_ssh_target,
+        ssh_port=config.user_vm_ssh_port,
+        ip_address=config.user_vm_test_ip,
+    )
+    logger("Runtime-топология выглядит готовой")
+
+
+def has_nonlocal_vpp_interface(show_interface_output: str) -> bool:
+    for raw_line in show_interface_output.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("Name") or stripped.startswith("local0"):
+            continue
+        return True
+    return False
+
+
+def ensure_vm_test_ip(name: str, ssh_target: str, ssh_port: int, ip_address: str) -> None:
+    command = f"ip -4 addr show | grep -qw {shlex.quote(ip_address)}"
+    result = run_ssh_command(ssh_target, ssh_port, command, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{name} не имеет тестового IP {ip_address}. "
+            "Скорее всего, VPP-facing интерфейс VM не поднят или VM стартовала без тестовой сети."
+        )
 
 
 def run_boundary_search(
@@ -492,7 +545,7 @@ def build_step_result(step: StepRecord) -> dict[str, Any]:
         "sent_packets": aggregate.get("sent_packets"),
         "received_replies": aggregate.get("received_replies"),
         "expected_replies": aggregate.get("expected_replies"),
-        "dropped_packets": aggregate.get("dropped_packets"),
+        "lost_replies": aggregate.get("lost_replies"),
         "loss_rate": step.loss_rate,
         "loss_source": aggregate.get("loss_source"),
         "latency_rtt_usec": aggregate.get("latency_rtt_usec"),

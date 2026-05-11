@@ -15,8 +15,10 @@ DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "results"
 DEFAULT_USER_VM_SSH_TARGET = "zero@10.8.2.11"
 DEFAULT_USER_VM_SSH_PORT = 22
 DEFAULT_USER_VM_TESTING_DIR = "/mnt/host/testing"
+DEFAULT_USER_VM_TEST_IP = "10.8.1.2"
 DEFAULT_EXTERNAL_VM_SSH_TARGET = "zero@10.8.2.10"
 DEFAULT_EXTERNAL_VM_SSH_PORT = 22
+DEFAULT_EXTERNAL_VM_TEST_IP = "10.8.0.2"
 DEFAULT_SOCKPERF_SERVER_SERVICE = "sockperf-server.service"
 DEFAULT_SERVER_IP = "10.8.0.2"
 DEFAULT_SERVER_PORT_BASE = 5001
@@ -48,8 +50,10 @@ class HostTestConfig:
     user_vm_ssh_target: str
     user_vm_ssh_port: int
     user_vm_testing_dir: str
+    user_vm_test_ip: str
     external_vm_ssh_target: str
     external_vm_ssh_port: int
+    external_vm_test_ip: str
     sockperf_server_service: str
     server_ip: str
     server_port_base: int
@@ -94,8 +98,10 @@ def load_test_configs(
         user_vm_ssh_target=DEFAULT_USER_VM_SSH_TARGET,
         user_vm_ssh_port=DEFAULT_USER_VM_SSH_PORT,
         user_vm_testing_dir=DEFAULT_USER_VM_TESTING_DIR,
+        user_vm_test_ip=DEFAULT_USER_VM_TEST_IP,
         external_vm_ssh_target=DEFAULT_EXTERNAL_VM_SSH_TARGET,
         external_vm_ssh_port=DEFAULT_EXTERNAL_VM_SSH_PORT,
+        external_vm_test_ip=DEFAULT_EXTERNAL_VM_TEST_IP,
         sockperf_server_service=DEFAULT_SOCKPERF_SERVER_SERVICE,
         server_ip=DEFAULT_SERVER_IP,
         server_port_base=DEFAULT_SERVER_PORT_BASE,
