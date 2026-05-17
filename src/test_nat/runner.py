@@ -151,10 +151,10 @@ def ensure_runtime_topology(config: HostTestConfig, logger: RunLogger) -> None:
     if not has_nonlocal_vpp_interface(result.stdout):
         raise RuntimeError(
             "VPP runtime-топология не поднята: 'show interface' содержит только local0. "
-            "startup.conf может уже указывать нужный NAT-режим, но vhost-интерфейсы исчезают после "
-            "restart/clean-network. Поднимите топологию заново: "
-            f"'uv run manage-nat switch --restart {config.nat_mode}' или "
-            f"'sudo ./manage setup-network --nat-mode {config.nat_mode} && sudo ./manage setup-vms'."
+            "startup.conf может уже указывать нужный NAT-режим, но runtime memif/BVI-интерфейсы "
+            "пропадают после restart/clean-network. Поднимите топологию заново: "
+            f"'manage-nat switch --restart {config.nat_mode}' или "
+            f"'manage-nat network setup {config.nat_mode}'."
         )
     ensure_vm_test_ip(
         name="external_vm",

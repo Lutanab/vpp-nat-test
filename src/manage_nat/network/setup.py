@@ -1,43 +1,384 @@
 from __future__ import annotations
 
+import re
+import subprocess
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import rich_click as click
 
-from ..nat_mode import ensure_valid_nat_mode
-from ..helpers import run_shell_script
+from ..helpers import run_command, with_privileges
+from ..nat_mode import (
+    MANAGED_BLOCK_BEGIN,
+    MANAGED_BLOCK_END,
+    STARTUP_CONF_PATH,
+    ensure_valid_nat_mode,
+)
+
+VPP_SERVICE_NAME = "vpp.service"
+BRIDGE_DOMAIN_ID = 10
+NAT44_MAX_SESSIONS = 10000
+NAT_FO_PUBLIC_ADDR = "10.8.0.1"
+NAT_FO_PORT_RANGE_START = 20000
+NAT_FO_PORT_RANGE_END = 40000
+NAT_INSIDE_BVI_IP_CIDR = "10.8.1.1/24"
+NAT_OUTSIDE_IP_CIDR = "10.8.0.1/24"
+UNKNOWN_INPUT_RE = re.compile(r"unknown input|unknown command|parse error", re.IGNORECASE)
+NAT_PLUGIN_LINE_RE = re.compile(r"^\s*plugin\s+nat_plugin\.so\s+\{.*\}\s*$")
+NAT_FO_PLUGIN_LINE_RE = re.compile(r"^\s*plugin\s+nat_fo_plugin\.so\s+\{.*\}\s*$")
+VPP_READY_TIMEOUT_SECONDS = 25
+VPP_READY_POLL_INTERVAL_SECONDS = 1
+
+
+@dataclass(frozen=True)
+class MemifEndpoint:
+    """Описание memif-конца, который поднимается в VPP."""
+
+    socket_id: int
+    interface_id: int
+    socket_path: str
+    role: str
+
+    @property
+    def interface_name(self) -> str:
+        """Возвращает ожидаемое имя интерфейса в VPP."""
+        return f"memif{self.socket_id}/{self.interface_id}"
+
+
+MEMIF_INSIDE_A = MemifEndpoint(
+    socket_id=10,
+    interface_id=0,
+    socket_path="/run/vpp/memif-inside-a.sock",
+    role="master",
+)
+MEMIF_INSIDE_B = MemifEndpoint(
+    socket_id=11,
+    interface_id=0,
+    socket_path="/run/vpp/memif-inside-b.sock",
+    role="master",
+)
+MEMIF_OUTSIDE = MemifEndpoint(
+    socket_id=20,
+    interface_id=0,
+    socket_path="/run/vpp/memif-outside.sock",
+    role="master",
+)
+
+
+def run_vppctl_command(command: str, description: str) -> str:
+    """Запускает `vppctl <command>` и валидирует, что CLI-команда распознана."""
+    result = subprocess.run(
+        with_privileges(["vppctl", command]),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part).strip()
+
+    if result.returncode != 0 or UNKNOWN_INPUT_RE.search(output):
+        details = output or f"vppctl returned code {result.returncode}"
+        raise RuntimeError(f"{description} failed: '{command}'. Details: {details}")
+
+    if output:
+        click.echo(f"  ✓ {description}: {output}")
+    else:
+        click.echo(f"  ✓ {description}")
+    return output
+
+
+def plugin_states_for_mode(nat_mode: str) -> tuple[str, str]:
+    """Возвращает desired-состояния плагинов `(nat_fo, nat44)` для NAT-режима."""
+    if nat_mode == "none":
+        return "disable", "disable"
+    if nat_mode == "nat44":
+        return "disable", "enable"
+    if nat_mode == "nat_fo":
+        return "enable", "disable"
+    raise ValueError(f"Unsupported NAT mode: {nat_mode}")
+
+
+def read_startup_conf() -> str:
+    """Считывает `/etc/vpp/startup.conf` через `sudo`."""
+    result = subprocess.run(
+        with_privileges(["cat", str(STARTUP_CONF_PATH)]),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise FileNotFoundError(f"Failed to read {STARTUP_CONF_PATH}: {result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout
+
+
+def write_startup_conf(content: str) -> None:
+    """Перезаписывает `/etc/vpp/startup.conf` через `sudo tee`."""
+    subprocess.run(
+        with_privileges(["tee", str(STARTUP_CONF_PATH)]),
+        text=True,
+        input=content,
+        capture_output=True,
+        check=True,
+    )
+
+
+def remove_managed_block(lines: list[str]) -> list[str]:
+    """Удаляет ранее управляемый блок плагинов из startup.conf."""
+    cleaned: list[str] = []
+    in_managed_block = False
+    for line in lines:
+        if line.strip() == MANAGED_BLOCK_BEGIN:
+            in_managed_block = True
+            continue
+        if line.strip() == MANAGED_BLOCK_END:
+            in_managed_block = False
+            continue
+        if in_managed_block:
+            continue
+        cleaned.append(line)
+    return cleaned
+
+
+def remove_nat_plugin_lines(lines: list[str]) -> list[str]:
+    """Удаляет прямые строки `plugin nat*_plugin.so {...}` во избежание конфликтов."""
+    result: list[str] = []
+    for line in lines:
+        if NAT_PLUGIN_LINE_RE.match(line) or NAT_FO_PLUGIN_LINE_RE.match(line):
+            continue
+        result.append(line)
+    return result
+
+
+def configure_vpp_nat_plugins_for_mode(nat_mode: str) -> None:
+    """Записывает managed-блок nat-плагинов в startup.conf."""
+    nat_fo_state, nat44_state = plugin_states_for_mode(nat_mode)
+    lines = read_startup_conf().splitlines()
+    lines = remove_managed_block(lines)
+    lines = remove_nat_plugin_lines(lines)
+    while lines and lines[-1].strip() == "":
+        lines.pop()
+    lines.extend(
+        [
+            "",
+            MANAGED_BLOCK_BEGIN,
+            "plugins {",
+            f"  plugin nat_fo_plugin.so {{ {nat_fo_state} }}",
+            f"  plugin nat_plugin.so {{ {nat44_state} }}",
+            "}",
+            MANAGED_BLOCK_END,
+            "",
+        ]
+    )
+    write_startup_conf("\n".join(lines))
+    click.echo(
+        "  ✓ startup.conf обновлен: "
+        f"nat_fo_plugin={nat_fo_state}, nat_plugin={nat44_state}"
+    )
+
+
+def restart_vpp_service() -> None:
+    """Перезапускает VPP и дожидается готовности CLI-сокета."""
+    if not vpp_service_exists():
+        raise RuntimeError(
+            "Service vpp.service is not installed. "
+            "Install VPP packages first (for example via repository build/deb install)."
+        )
+
+    run_command(with_privileges(["systemctl", "restart", VPP_SERVICE_NAME]))
+    wait_for_vpp_ready(timeout_seconds=VPP_READY_TIMEOUT_SECONDS)
+
+
+def vpp_service_exists() -> bool:
+    """Проверяет, что unit `vpp.service` присутствует в systemd."""
+    result = subprocess.run(
+        ["systemctl", "list-unit-files", "--type=service", VPP_SERVICE_NAME],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    return VPP_SERVICE_NAME in result.stdout
+
+
+def vpp_service_is_active() -> bool:
+    """Проверяет, что `vpp.service` в состоянии active."""
+    result = subprocess.run(
+        ["systemctl", "is-active", "--quiet", VPP_SERVICE_NAME],
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def wait_for_vpp_ready(timeout_seconds: int) -> None:
+    """Ожидает, пока `vppctl show version` начнет отвечать без ошибок."""
+    deadline = time.monotonic() + timeout_seconds
+    last_output = ""
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            with_privileges(["vppctl", "show", "version"]),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part).strip()
+        if result.returncode == 0 and not UNKNOWN_INPUT_RE.search(output):
+            click.echo("  ✓ VPP готов к приему vppctl команд")
+            return
+        last_output = output
+        time.sleep(VPP_READY_POLL_INTERVAL_SECONDS)
+
+    details = [f"Timed out waiting for VPP CLI readiness ({timeout_seconds}s)."]
+    if last_output:
+        details.append(f"Last vppctl output: {last_output}")
+    if not vpp_service_is_active():
+        status = subprocess.run(
+            with_privileges(["systemctl", "status", "--no-pager", "--lines=20", VPP_SERVICE_NAME]),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        journal = subprocess.run(
+            with_privileges(["journalctl", "-u", VPP_SERVICE_NAME, "-n", "40", "--no-pager"]),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        status_text = (status.stdout or status.stderr).strip()
+        journal_text = (journal.stdout or journal.stderr).strip()
+        if status_text:
+            details.append("systemctl status excerpt:\n" + status_text)
+        if journal_text:
+            details.append("journalctl excerpt:\n" + journal_text)
+    raise RuntimeError("\n\n".join(details))
+
+
+def create_memif_endpoint(endpoint: MemifEndpoint) -> None:
+    """Создаёт memif-сокет и memif-интерфейс в VPP."""
+    run_vppctl_command(
+        f"create memif socket id {endpoint.socket_id} filename {endpoint.socket_path}",
+        f"Создан memif socket id={endpoint.socket_id}",
+    )
+    run_vppctl_command(
+        (
+            "create interface memif "
+            f"id {endpoint.interface_id} socket-id {endpoint.socket_id} {endpoint.role}"
+        ),
+        f"Создан memif интерфейс {endpoint.interface_name}",
+    )
+    run_command(with_privileges(["chmod", "666", endpoint.socket_path]))
+
+
+def remove_stale_memif_sockets() -> None:
+    """Удаляет старые memif-сокеты перед пересозданием интерфейсов."""
+    for endpoint in (MEMIF_INSIDE_A, MEMIF_INSIDE_B, MEMIF_OUTSIDE):
+        run_command(with_privileges(["rm", "-f", endpoint.socket_path]))
+
+
+def create_bvi_interface() -> str:
+    """Создает loopback и возвращает его имя (будет использоваться как BVI)."""
+    output = run_vppctl_command("create loopback interface", "Создан loopback интерфейс для BVI")
+    for token in reversed(output.split()):
+        if token.startswith("loop"):
+            return token
+    raise RuntimeError(f"Failed to parse BVI interface name from output: {output}")
+
+
+def configure_l2_and_l3(bvi_interface: str) -> None:
+    """Собирает L2/L3-часть топологии: inside-bridge + BVI + outside."""
+    run_vppctl_command(f"create bridge-domain {BRIDGE_DOMAIN_ID}", f"Создан bridge-domain {BRIDGE_DOMAIN_ID}")
+    run_vppctl_command(
+        f"set interface l2 bridge {MEMIF_INSIDE_A.interface_name} {BRIDGE_DOMAIN_ID}",
+        "Inside A добавлен в bridge-domain",
+    )
+    run_vppctl_command(
+        f"set interface l2 bridge {MEMIF_INSIDE_B.interface_name} {BRIDGE_DOMAIN_ID}",
+        "Inside B добавлен в bridge-domain",
+    )
+    run_vppctl_command(
+        f"set interface l2 bridge {bvi_interface} {BRIDGE_DOMAIN_ID} bvi",
+        "BVI добавлен в bridge-domain",
+    )
+    run_vppctl_command(
+        f"set interface ip address {bvi_interface} {NAT_INSIDE_BVI_IP_CIDR}",
+        f"BVI получил IP {NAT_INSIDE_BVI_IP_CIDR}",
+    )
+    run_vppctl_command(
+        f"set interface ip address {MEMIF_OUTSIDE.interface_name} {NAT_OUTSIDE_IP_CIDR}",
+        f"Outside memif получил IP {NAT_OUTSIDE_IP_CIDR}",
+    )
+
+
+def set_interfaces_up(bvi_interface: str) -> None:
+    """Поднимает все интерфейсы стенда."""
+    interfaces = [
+        MEMIF_INSIDE_A.interface_name,
+        MEMIF_INSIDE_B.interface_name,
+        MEMIF_OUTSIDE.interface_name,
+        bvi_interface,
+    ]
+    for iface in interfaces:
+        run_vppctl_command(f"set interface state {iface} up", f"Поднят интерфейс {iface}")
+
+
+def configure_nat_runtime_mode(nat_mode: str, bvi_interface: str) -> None:
+    """Применяет runtime-конфигурацию NAT для already-up топологии."""
+    if nat_mode == "none":
+        click.echo("  ✓ NAT runtime-конфигурация пропущена (режим none)")
+        return
+
+    outside_iface = MEMIF_OUTSIDE.interface_name
+    if nat_mode == "nat44":
+        run_vppctl_command(
+            f"nat44 plugin enable sessions {NAT44_MAX_SESSIONS}",
+            f"NAT44 включен (sessions={NAT44_MAX_SESSIONS})",
+        )
+        run_vppctl_command(
+            f"set interface nat44 in {bvi_interface} out {outside_iface}",
+            "Назначены NAT44 роли inside/outside",
+        )
+        run_vppctl_command(
+            f"nat44 add interface address {outside_iface}",
+            "Внешний NAT44 адрес назначен по outside интерфейсу",
+        )
+        run_vppctl_command("show nat44 summary", "Проверка NAT44 summary")
+        return
+
+    run_vppctl_command(
+        f"nat_fo set public-addr {NAT_FO_PUBLIC_ADDR}",
+        f"NAT_FO public-addr={NAT_FO_PUBLIC_ADDR}",
+    )
+    run_vppctl_command(
+        f"nat_fo set port-range {NAT_FO_PORT_RANGE_START} {NAT_FO_PORT_RANGE_END}",
+        "NAT_FO port-range установлен",
+    )
+    run_vppctl_command(
+        f"nat_fo interface inside {bvi_interface}",
+        "NAT_FO inside интерфейс назначен",
+    )
+    run_vppctl_command(
+        f"nat_fo interface outside {outside_iface}",
+        "NAT_FO outside интерфейс назначен",
+    )
+    run_vppctl_command("show nat_fo", "Проверка NAT_FO summary")
 
 
 def setup_network(project_root: Path, nat_mode: str) -> None:
-    """Поднимает VPP runtime-топологию и применяет NAT-режим."""
+    """Поднимает VPP runtime-топологию memif+BVI и применяет NAT-режим."""
+    del project_root  # API-совместимость с другими workflow-функциями.
     mode = ensure_valid_nat_mode(nat_mode)
     click.echo(f"=== Подготовка сети (nat-mode={mode}) ===")
 
-    script = r"""
-set -euo pipefail
-source ./cli/constants.sh
-source ./cli/shell_helpers/vpp_helpers.sh
+    configure_vpp_nat_plugins_for_mode(mode)
+    restart_vpp_service()
+    remove_stale_memif_sockets()
 
-configure_vpp_nat_plugins_for_mode "$NAT_MODE"
-setup_vpp_service
+    for endpoint in (MEMIF_INSIDE_A, MEMIF_INSIDE_B, MEMIF_OUTSIDE):
+        create_memif_endpoint(endpoint)
 
-echo "=== Включение IPv4 forwarding ==="
-sudo sysctl -w net.ipv4.ip_forward=1
+    bvi_interface = create_bvi_interface()
+    configure_l2_and_l3(bvi_interface)
+    set_interfaces_up(bvi_interface)
+    configure_nat_runtime_mode(mode, bvi_interface)
 
-create_external_vhost_interface
-for socket_path in "${VHOST_SOCKETS[@]}"; do
-  check_and_create_vhost_socket "$socket_path"
-done
-
-prepare_vpp_network
-
-vpp_ifaces=()
-vpp_ifaces+=("$EXTERNAL_VHOST_VPP_IFACE")
-vpp_ifaces+=("$VPP_BVI_INTERFACE")
-vpp_ifaces+=("${VHOST_USER_VPP_IFACES[@]}")
-set_vpp_ifaces_up "${vpp_ifaces[@]}"
-
-configure_vpp_nat_runtime_mode "$NAT_MODE" "$VPP_BVI_INTERFACE" "$EXTERNAL_VHOST_VPP_IFACE"
-"""
-    run_shell_script(script, cwd=project_root, env={"NAT_MODE": mode}, capture_output=False)
     click.echo("✓ Сетевая топология готова")

@@ -5,8 +5,7 @@ from pathlib import Path
 import rich_click as click
 
 from .nat_mode import parse_managed_nat_mode
-from .healthcheck import run_vms_healthcheck
-from .helpers import ensure_manage_exists, run_command, with_privileges
+from .helpers import run_command, with_privileges
 from .network.clean import clean_network
 from .network.setup import setup_network
 
@@ -31,8 +30,6 @@ def rebuild_vpp_packages(project_root: Path) -> None:
 
 def switch_nat_mode(nat_mode: str, project_root: Path, restart: bool) -> None:
     """Выполняет полный workflow переключения NAT-режима."""
-    manage_path = ensure_manage_exists(project_root)
-
     click.echo(f"=== Switching NAT mode to: {nat_mode} ===")
 
     current_mode = parse_managed_nat_mode()
@@ -44,14 +41,11 @@ def switch_nat_mode(nat_mode: str, project_root: Path, restart: bool) -> None:
     if restart:
         click.echo("Restart requested: forcing the full workflow.")
 
-    run_command(with_privileges([str(manage_path), "stop-vms"]), cwd=project_root)
     clean_network(project_root)
 
     if nat_mode == "nat_fo":
         rebuild_vpp_packages(project_root)
 
     setup_network(project_root=project_root, nat_mode=nat_mode)
-    run_command(with_privileges([str(manage_path), "setup-vms"]), cwd=project_root)
-    run_vms_healthcheck(project_root)
 
-    click.echo("\n✓ NAT mode successfully switched and VMs are up")
+    click.echo("\n✓ NAT mode successfully switched and runtime topology is up")

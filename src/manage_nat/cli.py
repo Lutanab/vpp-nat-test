@@ -26,7 +26,7 @@ def app() -> None:
     help="Корень репозитория.",
 )
 def prepare_command(project_root: Path) -> None:
-    """Готовит окружение (VPP deps, системные пакеты, libvirt networking)."""
+    """Готовит окружение (VPP deps и системные пакеты)."""
     run_prepare(project_root=project_root)
 
 

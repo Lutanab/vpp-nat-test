@@ -66,7 +66,7 @@ manage-nat network setup <none|nat44|nat_fo>
 Что делает команда автоматически:
 - обновляет в `/etc/vpp/startup.conf` управляемый блок плагинов (`nat_plugin.so` / `nat_fo_plugin.so`);
 - перезапускает VPP;
-- поднимает VPP-сетевую топологию (vhost + bridge/BVI);
+- поднимает VPP-сетевую топологию (memif + bridge/BVI);
 - применяет runtime-конфигурацию выбранного NAT-режима.
 
 ### `nat_fo` режим
@@ -79,7 +79,7 @@ manage-nat network setup nat_fo
 - `nat_fo set public-addr 10.8.0.1`
 - `nat_fo set port-range 20000 40000`
 - `nat_fo interface inside <BVI>`
-- `nat_fo interface outside <external-vhost>`
+- `nat_fo interface outside <outside-memif>`
 
 Проверка:
 
@@ -134,8 +134,8 @@ manage-nat network setup nat44
 
 Автоматически применяются команды:
 - `nat44 plugin enable sessions 10000`
-- `set interface nat44 in <BVI> out <external-vhost>`
-- `nat44 add interface address <external-vhost>`
+- `set interface nat44 in <BVI> out <outside-memif>`
+- `nat44 add interface address <outside-memif>`
 
 Проверка:
 

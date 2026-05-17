@@ -51,11 +51,3 @@ def run_shell_script(
         check=True,
     )
     return result.stdout if capture_output else ""
-
-
-def ensure_manage_exists(project_root: Path) -> Path:
-    """Проверяет наличие скрипта `manage` в корне проекта."""
-    manage_path = (project_root / "manage").resolve()
-    if not manage_path.exists():
-        raise FileNotFoundError(f"Manage script not found: {manage_path}")
-    return manage_path

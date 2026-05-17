@@ -5,13 +5,9 @@ from pathlib import Path
 
 import rich_click as click
 
-from .helpers import run_command, run_shell_script, with_privileges
+from .helpers import run_command, with_privileges
 
 APT_PACKAGES = (
-    "libvirt-daemon-system",
-    "libvirt-clients",
-    "bridge-utils",
-    "cloud-image-utils",
     "socat",
     "iptables",
 )
@@ -44,7 +40,7 @@ def is_package_installed(name: str) -> bool:
 
 
 def install_apt_dependencies() -> None:
-    """Устанавливает необходимые apt-пакеты (без QEMU)."""
+    """Устанавливает необходимые системные пакеты."""
     click.echo("=== Установка системных пакетов ===")
     run_command(with_privileges(["apt-get", "update"]))
     missing = [pkg for pkg in APT_PACKAGES if not is_package_installed(pkg)]
@@ -54,22 +50,10 @@ def install_apt_dependencies() -> None:
     run_command(with_privileges(["apt-get", "install", "-y", *missing]))
 
 
-def configure_libvirt_networking(project_root: Path) -> None:
-    """Настраивает libvirt networking через существующий shell-helper."""
-    script = r"""
-set -euo pipefail
-source ./cli/constants.sh
-source ./cli/shell_helpers/libvirt.sh
-configure_libvirt_networking
-"""
-    run_shell_script(script, cwd=project_root, capture_output=False)
-
-
 def run_prepare(project_root: Path) -> None:
     """Готовит окружение для NAT-тестового стенда."""
     click.echo("=== Подготовка окружения ===")
     vpp_dir = ensure_vpp_directory(project_root)
     install_vpp_dependencies(vpp_dir)
     install_apt_dependencies()
-    configure_libvirt_networking(project_root)
     click.echo("✓ Подготовка завершена")
