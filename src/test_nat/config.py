@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_LOAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "load" / "test_config.yaml"
-DEFAULT_LOAD_CONFIG_TEMPLATE_PATH = PROJECT_ROOT / "configs" / "load" / "test_config.yaml.template"
-DEFAULT_SEARCH_CONFIG_PATH = PROJECT_ROOT / "configs" / "search" / "test_config.yaml"
-DEFAULT_SEARCH_CONFIG_TEMPLATE_PATH = PROJECT_ROOT / "configs" / "search" / "test_config.yaml.template"
+DEFAULT_LOAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "loadtest" / "load" / "test_config.yaml"
+DEFAULT_LOAD_CONFIG_TEMPLATE_PATH = PROJECT_ROOT / "configs" / "loadtest" / "load" / "test_config.yaml.template"
+DEFAULT_SEARCH_CONFIG_PATH = PROJECT_ROOT / "configs" / "loadtest" / "search" / "test_config.yaml"
+DEFAULT_SEARCH_CONFIG_TEMPLATE_PATH = PROJECT_ROOT / "configs" / "loadtest" / "search" / "test_config.yaml.template"
 DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "results"
 DEFAULT_USER_VM_SSH_TARGET = "zero@10.8.2.11"
 DEFAULT_USER_VM_SSH_PORT = 22
@@ -25,7 +25,7 @@ DEFAULT_SERVER_PORT_BASE = 5001
 DEFAULT_REPLY_EVERY = 100
 DEFAULT_VPP_SERVICE_NAME = "vpp.service"
 DEFAULT_SCRAPE_INTERVAL_SEC = 1.0
-DEFAULT_TEST_NAME = "sockperf_nat_boundary"
+DEFAULT_TEST_NAME = "trex_nat_boundary"
 VALID_NAT_MODES = ("none", "nat44", "nat_fo")
 
 
@@ -45,7 +45,6 @@ class SearchConfig:
 class HostTestConfig:
     nat_mode: str
     packet_size: int
-    n_flows: int
     target_loss_rate: float
     user_vm_ssh_target: str
     user_vm_ssh_port: int
@@ -93,7 +92,6 @@ def load_test_configs(
     config = HostTestConfig(
         nat_mode=ensure_valid_nat_mode(str(require(raw_load_config, "nat_mode"))),
         packet_size=int(require(raw_load_config, "packet_size")),
-        n_flows=int(require(raw_load_config, "n_flows")),
         target_loss_rate=float(require(raw_load_config, "target_loss_rate")),
         user_vm_ssh_target=DEFAULT_USER_VM_SSH_TARGET,
         user_vm_ssh_port=DEFAULT_USER_VM_SSH_PORT,
@@ -112,7 +110,7 @@ def load_test_configs(
         test_name=DEFAULT_TEST_NAME,
     )
     search = SearchConfig(
-        warmup_sec=int(require(raw_search_config, "warmup_sec")),
+        warmup_sec=int(raw_search_config.get("warmup_sec", 0)),
         measurement_sec=int(require(raw_search_config, "measurement_sec")),
         search_initial_pps=int(require(raw_search_config, "search_initial_pps")),
         search_max_pps=int(require(raw_search_config, "search_max_pps")),
@@ -125,8 +123,6 @@ def load_test_configs(
 def validate_config(config: HostTestConfig, search: SearchConfig) -> None:
     if config.packet_size <= 0:
         raise ValueError("packet_size must be positive")
-    if config.n_flows <= 0:
-        raise ValueError("n_flows must be positive")
     if config.target_loss_rate < 0:
         raise ValueError("target_loss_rate must be non-negative")
     if config.reply_every <= 0:
@@ -150,7 +146,6 @@ def build_results_dir(config: HostTestConfig) -> Path:
         ("test_name", config.test_name),
         ("target_loss_rate", config.target_loss_rate),
         ("packet_size", config.packet_size),
-        ("n_flows", config.n_flows),
         ("nat_mode", config.nat_mode),
     )
     path = config.results_root

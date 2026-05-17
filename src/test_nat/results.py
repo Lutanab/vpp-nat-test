@@ -35,4 +35,16 @@ class RunLogger:
         line = f"{utc_now_iso()} {message}"
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
-        print(f"[test-nat] {message}", flush=True)
+        for output_line in message.splitlines() or [""]:
+            print(f"[test-nat] {output_line}", flush=True)
+
+    def begin(self, message: str) -> None:
+        line = f"{utc_now_iso()} {message}"
+        with self.log_path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+        print(f"[test-nat] {message}", end="", flush=True)
+
+    def finish(self, message: str) -> None:
+        with self.log_path.open("a", encoding="utf-8") as handle:
+            handle.write(message + "\n")
+        print(message, flush=True)

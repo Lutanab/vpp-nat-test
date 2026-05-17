@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import sys
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,21 @@ UDP_PACKET_SIZE_BYTES = 64
 UDP_SRC_PORT = 12345
 UDP_DST_PORT = 5001
 TREX_SERVER_HOST = "127.0.0.1"
+
+
+@dataclass(frozen=True)
+class UdpRunResult:
+    """Результат UDP-прогона через TRex."""
+
+    target_pps: int
+    duration_sec: float
+    packet_size: int
+    tx_packets: int
+    rx_packets: int
+    lost_packets: int
+    loss_rate: float
+    loss_percent: float
+    actual_sent_pps: float
 
 
 def load_trex_stl_api() -> Any:
@@ -47,7 +63,7 @@ def find_trex_api_dir() -> Path | None:
     return None
 
 
-def build_udp_stream(api: Any, target_pps: int, duration: float) -> Any:
+def build_udp_stream(api: Any, target_pps: int, duration: float, packet_size: int = UDP_PACKET_SIZE_BYTES) -> Any:
     """Собирает UDP stream `inside-a -> outside` с flow-stat PGID."""
     total_pkts = max(1, int(target_pps * duration))
     base_packet = (
@@ -55,7 +71,7 @@ def build_udp_stream(api: Any, target_pps: int, duration: float) -> Any:
         / api.IP(src=TREX_INSIDE_A_IP, dst=TREX_OUTSIDE_IP)
         / api.UDP(sport=UDP_SRC_PORT, dport=UDP_DST_PORT)
     )
-    padding_size = max(0, UDP_PACKET_SIZE_BYTES - len(base_packet))
+    padding_size = max(0, packet_size - len(base_packet))
     packet = base_packet / (b"x" * padding_size)
 
     return api.STLStream(
@@ -74,8 +90,8 @@ def extract_total_counter(flow_stats: dict[str, Any], counter_name: str) -> int:
     return sum(int(value) for value in counter.values() if isinstance(value, (int, float)))
 
 
-def calculate_loss_percent(client: Any) -> float:
-    """Считает процент потерь по PGID-статистике UDP stream."""
+def read_udp_counters(client: Any) -> tuple[int, int]:
+    """Считывает tx/rx counters по PGID-статистике UDP stream."""
     pgid_stats = client.get_pgid_stats(pgid_list=[UDP_PG_ID])
     flow_stats_by_id = pgid_stats.get("flow_stats", {})
     flow_stats = flow_stats_by_id.get(UDP_PG_ID) or flow_stats_by_id.get(str(UDP_PG_ID))
@@ -84,6 +100,12 @@ def calculate_loss_percent(client: Any) -> float:
 
     tx_pkts = extract_total_counter(flow_stats, "tx_pkts")
     rx_pkts = extract_total_counter(flow_stats, "rx_pkts")
+    return tx_pkts, rx_pkts
+
+
+def calculate_loss_percent(client: Any) -> float:
+    """Считает процент потерь по PGID-статистике UDP stream."""
+    tx_pkts, rx_pkts = read_udp_counters(client)
     if tx_pkts <= 0:
         raise RuntimeError("TRex reported zero transmitted UDP packets")
 
@@ -102,12 +124,18 @@ def configure_l3_mode(client: Any) -> None:
         client.set_service_mode(ports=ports, enabled=False)
 
 
-def run_udp_test(target_pps: int, duration: float) -> float:
-    """Запускает UDP TRex-тест и возвращает процент потерь."""
+def run_udp_measurement(
+    target_pps: int,
+    duration: float,
+    packet_size: int = UDP_PACKET_SIZE_BYTES,
+) -> UdpRunResult:
+    """Запускает UDP TRex-тест и возвращает counters/процент потерь."""
     if target_pps <= 0:
         raise ValueError("target_pps must be positive")
     if duration <= 0:
         raise ValueError("duration must be positive")
+    if packet_size <= 0:
+        raise ValueError("packet_size must be positive")
 
     api = load_trex_stl_api()
     client = api.STLClient(server=TREX_SERVER_HOST)
@@ -118,14 +146,34 @@ def run_udp_test(target_pps: int, duration: float) -> float:
         client.reset(ports=ports)
         configure_l3_mode(client)
         client.remove_all_streams(ports=[CLIENT_PORT])
-        client.add_streams(build_udp_stream(api, target_pps, duration), ports=[CLIENT_PORT])
+        client.add_streams(build_udp_stream(api, target_pps, duration, packet_size), ports=[CLIENT_PORT])
         client.clear_stats(ports=ports)
         client.start(ports=[CLIENT_PORT])
         client.wait_on_traffic(ports=ports)
-        return calculate_loss_percent(client)
+        tx_packets, rx_packets = read_udp_counters(client)
+        if tx_packets <= 0:
+            raise RuntimeError("TRex reported zero transmitted UDP packets")
+        lost_packets = max(0, tx_packets - rx_packets)
+        loss_rate = lost_packets / tx_packets
+        return UdpRunResult(
+            target_pps=target_pps,
+            duration_sec=duration,
+            packet_size=packet_size,
+            tx_packets=tx_packets,
+            rx_packets=rx_packets,
+            lost_packets=lost_packets,
+            loss_rate=loss_rate,
+            loss_percent=loss_rate * 100,
+            actual_sent_pps=tx_packets / duration,
+        )
     finally:
         try:
             client.stop(ports=[CLIENT_PORT])
         except Exception:
             pass
         client.disconnect()
+
+
+def run_udp_test(target_pps: int, duration: float) -> float:
+    """Запускает UDP TRex-тест и возвращает процент потерь."""
+    return run_udp_measurement(target_pps=target_pps, duration=duration).loss_percent

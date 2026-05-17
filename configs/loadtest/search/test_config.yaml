@@ -1,5 +1,4 @@
-warmup_sec: 10
 measurement_sec: 100
-search_initial_pps: 100000
-search_max_pps: 10000000
+search_initial_pps: 1000000
+search_max_pps: 10000000000
 search_relative_precision: 0.005

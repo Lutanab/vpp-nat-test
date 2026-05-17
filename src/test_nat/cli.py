@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
 import rich_click as click
 
-from .config import HostTestConfig, load_test_configs
-from .runner import BoundarySearchError, run_load_search
+from .config import load_test_configs
+from .load_runner import LoadSearchError, run_load_test
 from .trex.run.simple import CapturedTcpPacket, SimpleTcpTestResult, run_simple_tcp_test
 from .trex.run.udp import run_udp_test
 from .trex.setup import setup_trex_server
@@ -70,72 +69,33 @@ def run_simple_command() -> None:
     print_simple_tcp_result(run_simple_tcp_test())
 
 
-@app.group("load")
-def load_group() -> None:
-    """Run load benchmark workflows from the host."""
-
-
-@load_group.command("run")
+@run_group.command("load")
 @click.option(
     "--load-config",
     "--config",
     type=click.Path(path_type=Path, dir_okay=False),
-    help="Path to load YAML config. Defaults to configs/load/test_config.yaml.",
+    help="Path to load YAML config. Defaults to configs/loadtest/load/test_config.yaml.",
 )
 @click.option(
     "--search-config",
     type=click.Path(path_type=Path, dir_okay=False),
-    help="Path to search YAML config. Defaults to configs/search/test_config.yaml.",
+    help="Path to search YAML config. Defaults to configs/loadtest/search/test_config.yaml.",
 )
-def load_run_command(
+def run_load_command(
     load_config: Path | None,
     search_config: Path | None,
 ) -> None:
-    """Load configs and run the host-side boundary search."""
+    """Run TRex PPS boundary search."""
     resolved_config, search, load_config_path, search_config_path = load_test_configs(load_config, search_config)
-    reset_known_hosts_for_test_vms(resolved_config)
     try:
-        run_load_search(
+        run_load_test(
             resolved_config,
             search,
             load_config_path,
             search_config_path,
         )
-    except BoundarySearchError as exc:
+    except LoadSearchError as exc:
         raise click.ClickException(str(exc)) from exc
-
-
-def reset_known_hosts_for_test_vms(config: HostTestConfig) -> None:
-    """Drop stale SSH host keys after VM recreation."""
-    targets = (
-        ("external_vm", config.external_vm_ssh_target, config.external_vm_ssh_port),
-        ("user_vm_1", config.user_vm_ssh_target, config.user_vm_ssh_port),
-    )
-    for vm_name, ssh_target, ssh_port in targets:
-        host = extract_ssh_host(ssh_target)
-        for known_hosts_pattern in known_hosts_patterns(host, ssh_port):
-            subprocess.run(
-                ["ssh-keygen", "-R", known_hosts_pattern],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        click.echo(f"known_hosts очищен для {vm_name}: {host}:{ssh_port}")
-
-
-def extract_ssh_host(ssh_target: str) -> str:
-    host = ssh_target.rsplit("@", 1)[-1]
-    if host.startswith("[") and "]" in host:
-        return host[1 : host.index("]")]
-    if host.count(":") == 1:
-        return host.split(":", 1)[0]
-    return host
-
-
-def known_hosts_patterns(host: str, port: int) -> tuple[str, ...]:
-    if port == 22:
-        return (host,)
-    return (host, f"[{host}]:{port}")
 
 
 def print_simple_tcp_result(result: SimpleTcpTestResult) -> None:

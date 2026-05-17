@@ -5,8 +5,8 @@ tmp/
 results/
 results copy/
 vmstat_logs/
-configs/load/test_config.yaml
-configs/search/test_config.yaml
+configs/loadtest/load/test_config.yaml
+configs/loadtest/search/test_config.yaml
 
 __pycache__
 virtual_machines/host_mounts/user_vm_1/testing/.venv/
