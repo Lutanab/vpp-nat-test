@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-manage-nat = "manage_nat.cli:main"
+manage-nat = "manage_nat.cli:app"
 test-nat = "test_nat.cli:main"
 
 [tool.setuptools]

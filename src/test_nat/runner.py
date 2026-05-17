@@ -11,7 +11,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
-from manage_nat._nat_mode import parse_managed_nat_mode
+from manage_nat.nat_mode import parse_managed_nat_mode
 
 from .config import HostTestConfig, SearchConfig, build_results_dir
 from .results import RunLogger, ensure_directory, parse_utc_iso, write_json
