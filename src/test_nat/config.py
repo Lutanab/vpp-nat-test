@@ -215,7 +215,7 @@ def parse_yaml_scalar(value_text: str) -> Any:
     if value_text == "":
         return None
     lowered = value_text.lower()
-    if lowered in {"null", "~", "none"}:
+    if lowered in {"null", "~"}:
         return None
     if lowered == "true":
         return True
