@@ -16,3 +16,6 @@ virtual_machines/host_mounts/*/host_id_*.pub
 .venv
 
 *.egg-info
+
+configs/trex/trex.log
+configs/trex/trex.pid

@@ -8,11 +8,66 @@ import rich_click as click
 
 from .config import HostTestConfig, load_test_configs
 from .runner import BoundarySearchError, run_load_search
+from .trex.run.simple import CapturedTcpPacket, SimpleTcpTestResult, run_simple_tcp_test
+from .trex.run.udp import run_udp_test
+from .trex.setup import setup_trex_server
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def app() -> None:
     """Host-side NAT benchmark orchestration."""
+
+
+@app.group("setup")
+def setup_group() -> None:
+    """Deploy benchmark runtime components."""
+
+
+@setup_group.command("trex")
+def setup_trex_command() -> None:
+    """Deploy TRex server for the current VPP memif topology."""
+    setup_trex_server()
+
+
+@app.group("trex")
+def trex_group() -> None:
+    """Run TRex-based benchmark workflows."""
+
+
+@trex_group.group("run")
+def trex_run_group() -> None:
+    """Run TRex traffic tests."""
+
+
+@trex_run_group.command("udp")
+@click.option(
+    "--target-pps",
+    type=int,
+    required=True,
+    help="Target UDP packets per second. Example: 100000 or 1000000.",
+)
+@click.option(
+    "--duration",
+    type=float,
+    required=True,
+    help="Test duration in seconds. Example: 10 or 30.5.",
+)
+def trex_run_udp_command(target_pps: int, duration: float) -> None:
+    """Run UDP traffic through the current TRex/VPP topology."""
+    loss_percent = run_udp_test(target_pps=target_pps, duration=duration)
+    click.echo(f"Loss Percent:")
+    click.echo(f"{loss_percent:.6f}")
+
+
+@app.group("run")
+def run_group() -> None:
+    """Run functional checks from the host."""
+
+
+@run_group.command("simple")
+def run_simple_command() -> None:
+    """Run a minimal TCP NAT correctness check."""
+    print_simple_tcp_result(run_simple_tcp_test())
 
 
 @app.group("load")
@@ -81,6 +136,41 @@ def known_hosts_patterns(host: str, port: int) -> tuple[str, ...]:
     if port == 22:
         return (host,)
     return (host, f"[{host}]:{port}")
+
+
+def print_simple_tcp_result(result: SimpleTcpTestResult) -> None:
+    """Печатает результат минимальной TCP-проверки NAT."""
+    click.echo(f"NAT: {format_nat_status(result.nat_applied)}")
+    click.echo(result.verdict)
+
+    if not result.captured_packets:
+        click.echo("Packets: <empty>")
+        return
+    for packet in result.captured_packets:
+        print_captured_tcp_packet(packet)
+
+
+def format_nat_status(nat_applied: bool | None) -> str:
+    """Форматирует короткий статус NAT для CLI."""
+    if nat_applied is True:
+        return "works"
+    if nat_applied is False:
+        return "does not work"
+    return "unknown"
+
+
+def print_captured_tcp_packet(packet: CapturedTcpPacket) -> None:
+    """Печатает только адреса и порты TCP-пакета."""
+    src = format_endpoint(packet.ip_src, packet.tcp_src_port)
+    dst = format_endpoint(packet.ip_dst, packet.tcp_dst_port)
+    click.echo(f"Packet: {src} -> {dst}")
+
+
+def format_endpoint(ip: str | None, port: int | None) -> str:
+    """Форматирует `ip:port`, сохраняя пустые значения читаемыми."""
+    rendered_ip = ip or "?"
+    rendered_port = str(port) if port is not None else "?"
+    return f"{rendered_ip}:{rendered_port}"
 
 
 def main() -> int:
