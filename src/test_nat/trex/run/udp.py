@@ -28,6 +28,8 @@ class UdpRunResult:
     target_pps: int
     duration_sec: float
     packet_size: int
+    expected_packets: int
+    received_packets: int
     tx_packets: int
     rx_packets: int
     lost_packets: int
@@ -113,6 +115,12 @@ def calculate_loss_percent(client: Any) -> float:
     return (lost_pkts / tx_pkts) * 100
 
 
+def calculate_expected_packets(target_pps: int, duration: float, tx_packets: int) -> int:
+    """Считает expected packets для unified loss с учетом TRex overshoot."""
+    target_packets = max(1, int(target_pps * duration))
+    return max(tx_packets, target_packets)
+
+
 def configure_l3_mode(client: Any) -> None:
     """Настраивает L3/ARP для отправляющего и принимающего TRex-портов."""
     ports = [CLIENT_PORT, SERVER_PORT]
@@ -152,14 +160,16 @@ def run_udp_measurement(
         time.sleep(duration)
         client.stop(ports=[CLIENT_PORT])
         tx_packets, rx_packets = read_udp_counters(client)
-        if tx_packets <= 0:
-            raise RuntimeError("TRex reported zero transmitted UDP packets")
-        lost_packets = max(0, tx_packets - rx_packets)
-        loss_rate = lost_packets / tx_packets
+        expected_packets = calculate_expected_packets(target_pps, duration, tx_packets)
+        received_packets = rx_packets
+        lost_packets = max(0, expected_packets - received_packets)
+        loss_rate = lost_packets / expected_packets
         return UdpRunResult(
             target_pps=target_pps,
             duration_sec=duration,
             packet_size=packet_size,
+            expected_packets=expected_packets,
+            received_packets=received_packets,
             tx_packets=tx_packets,
             rx_packets=rx_packets,
             lost_packets=lost_packets,

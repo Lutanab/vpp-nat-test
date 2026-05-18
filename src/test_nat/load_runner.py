@@ -238,7 +238,8 @@ def run_boundary_search(
         logger.finish(
             " -> "
             f"loss={measurement.loss_percent:.6f}%, "
-            f"tx={format_number(measurement.tx_packets)}, "
+            f"expected={format_number(measurement.expected_packets)}, "
+            f"received={format_number(measurement.received_packets)}, "
             f"loss={format_number(measurement.lost_packets)} {format_verdict(passed)}"
         )
         step = LoadStep(
@@ -347,6 +348,8 @@ def build_step_result(step: LoadStep) -> dict[str, Any]:
         "target_pps": step.target_pps,
         "passed": step.passed,
         "actual_sent_pps": measurement.actual_sent_pps,
+        "expected_packets": measurement.expected_packets,
+        "received_packets": measurement.received_packets,
         "tx_packets": measurement.tx_packets,
         "rx_packets": measurement.rx_packets,
         "lost_packets": measurement.lost_packets,
