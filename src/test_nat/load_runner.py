@@ -11,6 +11,7 @@ from manage_nat.nat_mode import parse_managed_nat_mode
 from .config import HostTestConfig, SearchConfig, build_results_dir
 from .results import RunLogger, ensure_directory, write_json
 from .trex.run.udp import UdpRunResult, run_udp_measurement
+from .trex.setup import setup_trex_server
 
 LOG_FILE_NAME = "program.log"
 HISTORY_FILE_NAME = "history.json"
@@ -21,6 +22,14 @@ CLEAR_NAT_COMMANDS = {
     "nat44": "sudo vppctl clear nat44 ed sessions",
     "nat_fo": "sudo vppctl nat_fo clear sessions",
 }
+
+
+def manage_nat_command() -> str:
+    """Возвращает путь к CLI `manage-nat` из текущего virtualenv, если он есть."""
+    local_command = Path(sys.executable).with_name("manage-nat")
+    if local_command.exists():
+        return str(local_command)
+    return "manage-nat"
 
 
 class LoadSearchError(RuntimeError):
@@ -61,8 +70,9 @@ def run_load_test(
     )
 
     try:
-        ensure_nat_mode(config.nat_mode, logger)
+        topology_changed = ensure_nat_mode(config.nat_mode, logger)
         ensure_vpp_topology(logger)
+        ensure_trex_ready(topology_changed, logger)
         payload = run_boundary_search(
             config=config,
             search=search,
@@ -119,15 +129,15 @@ def reset_results_dir(results_dir: Path) -> None:
         (results_dir / file_name).unlink(missing_ok=True)
 
 
-def ensure_nat_mode(target_mode: str, logger: RunLogger) -> None:
-    """Проверяет и при необходимости переключает NAT-режим."""
+def ensure_nat_mode(target_mode: str, logger: RunLogger) -> bool:
+    """Проверяет NAT-режим и возвращает True, если топология пересоздавалась."""
     current_mode = parse_managed_nat_mode()
     if current_mode == target_mode:
-        return
+        return False
 
     logger(f"Переключаем NAT-режим: {current_mode} -> {target_mode}")
     result = subprocess.run(
-        [sys.executable, "-m", "manage_nat", "switch", target_mode],
+        [manage_nat_command(), "switch", target_mode],
         text=True,
         capture_output=True,
         check=False,
@@ -135,6 +145,7 @@ def ensure_nat_mode(target_mode: str, logger: RunLogger) -> None:
     if result.returncode != 0:
         log_failed_subprocess("manage-nat", result, logger)
         raise RuntimeError(f"manage-nat switch failed with code {result.returncode}")
+    return True
 
 
 def ensure_vpp_topology(logger: RunLogger) -> None:
@@ -160,6 +171,42 @@ def has_nonlocal_vpp_interface(show_interface_output: str) -> bool:
             continue
         return True
     return False
+
+
+def ensure_trex_ready(topology_changed: bool, logger: RunLogger) -> None:
+    """Перезапускает TRex, если VPP-топология была пересоздана или link down."""
+    if topology_changed:
+        restart_trex_server("VPP topology changed after NAT mode switch", logger)
+        return
+    if not trex_links_are_up():
+        restart_trex_server("TRex memif links are down", logger)
+
+
+def restart_trex_server(reason: str, logger: RunLogger) -> None:
+    """Перезапускает TRex server под текущие VPP memif-сокеты."""
+    logger(f"Перезапускаем TRex server: {reason}")
+    setup_trex_server()
+
+
+def trex_links_are_up() -> bool:
+    """Проверяет, что оба TRex-порта видят link UP."""
+    from .trex.run.udp import CLIENT_PORT, SERVER_PORT, TREX_SERVER_HOST, load_trex_stl_api
+
+    api = load_trex_stl_api()
+    client = api.STLClient(server=TREX_SERVER_HOST)
+    try:
+        client.connect()
+        for port in (CLIENT_PORT, SERVER_PORT):
+            if client.get_port_attr(port).get("link") != "UP":
+                return False
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            client.disconnect()
+        except Exception:
+            pass
 
 
 def run_boundary_search(

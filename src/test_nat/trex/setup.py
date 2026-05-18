@@ -28,6 +28,9 @@ TREX_READY_TIMEOUT_SECONDS = 30
 TREX_READY_POLL_INTERVAL_SECONDS = 1
 TREX_INSIDE_A_IP = "10.8.1.2"
 TREX_OUTSIDE_IP = "10.8.0.2"
+TREX_PORT_BANDWIDTH_GB = 200
+TREX_LIMIT_MEMORY_MB = 1024
+TREX_MBUF_FACTOR = "0.2"
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,8 @@ def render_trex_config() -> str:
     )
     return f"""- port_limit: {len(TREX_PORTS)}
   version: 2
+  limit_memory: {TREX_LIMIT_MEMORY_MB}
+  port_bandwidth_gb: {TREX_PORT_BANDWIDTH_GB}
   interfaces:
 {interface_lines}
   port_info:
@@ -136,6 +141,27 @@ def read_trex_pid() -> int | None:
         return None
 
 
+def read_trex_process_pids(config_path: Path = TREX_CFG_PATH) -> tuple[int, ...]:
+    """Находит живые TRex-процессы, запущенные с config_path."""
+    result = subprocess.run(
+        ["pgrep", "-f", str(config_path.resolve())],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ()
+
+    pids: list[int] = []
+    for raw_pid in result.stdout.splitlines():
+        try:
+            pid = int(raw_pid.strip())
+        except ValueError:
+            continue
+        pids.append(pid)
+    return tuple(pids)
+
+
 def process_is_running(pid: int) -> bool:
     """Проверяет, жив ли процесс по PID."""
     try:
@@ -149,23 +175,31 @@ def process_is_running(pid: int) -> bool:
 
 def stop_existing_trex_server() -> None:
     """Останавливает ранее запущенный через setup TRex server."""
+    pids = set(read_trex_process_pids())
     pid = read_trex_pid()
-    if pid is None:
-        return
-    if not process_is_running(pid):
+    if pid is not None:
+        pids.add(pid)
+
+    live_pids = {pid for pid in pids if process_is_running(pid)}
+    if not live_pids:
         TREX_PID_PATH.unlink(missing_ok=True)
         return
 
-    click.echo(f"  Останавливаю старый TRex server (pid={pid})")
-    subprocess.run(["sudo", "kill", str(pid)], check=False)
+    rendered_pids = ", ".join(str(pid) for pid in sorted(live_pids))
+    click.echo(f"  Останавливаю старый TRex server (pid={rendered_pids})")
+    for pid in sorted(live_pids):
+        subprocess.run(["sudo", "kill", str(pid)], check=False)
+
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        if not process_is_running(pid):
+        if all(not process_is_running(pid) for pid in live_pids):
             TREX_PID_PATH.unlink(missing_ok=True)
             return
         time.sleep(0.5)
 
-    subprocess.run(["sudo", "kill", "-9", str(pid)], check=False)
+    for pid in sorted(live_pids):
+        if process_is_running(pid):
+            subprocess.run(["sudo", "kill", "-9", str(pid)], check=False)
     TREX_PID_PATH.unlink(missing_ok=True)
 
 
@@ -196,7 +230,15 @@ def start_trex_server(trex_binary: Path, config_path: Path) -> int:
     trex_workdir = trex_binary.parent
     log_file = TREX_LOG_PATH.open("ab")
     process = subprocess.Popen(
-        ["sudo", str(trex_binary), "-i", "--cfg", str(config_path.resolve())],
+        [
+            "sudo",
+            str(trex_binary),
+            "-i",
+            "--cfg",
+            str(config_path.resolve()),
+            "--mbuf-factor",
+            TREX_MBUF_FACTOR,
+        ],
         cwd=str(trex_workdir),
         stdout=log_file,
         stderr=subprocess.STDOUT,

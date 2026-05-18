@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,9 +64,8 @@ def find_trex_api_dir() -> Path | None:
     return None
 
 
-def build_udp_stream(api: Any, target_pps: int, duration: float, packet_size: int = UDP_PACKET_SIZE_BYTES) -> Any:
-    """Собирает UDP stream `inside-a -> outside` с flow-stat PGID."""
-    total_pkts = max(1, int(target_pps * duration))
+def build_udp_stream(api: Any, target_pps: int, packet_size: int = UDP_PACKET_SIZE_BYTES) -> Any:
+    """Собирает continuous UDP stream `inside-a -> outside` с flow-stat PGID."""
     base_packet = (
         api.Ether()
         / api.IP(src=TREX_INSIDE_A_IP, dst=TREX_OUTSIDE_IP)
@@ -77,7 +77,7 @@ def build_udp_stream(api: Any, target_pps: int, duration: float, packet_size: in
     return api.STLStream(
         name="udp_inside_a_to_outside",
         packet=api.STLPktBuilder(pkt=packet),
-        mode=api.STLTXSingleBurst(total_pkts=total_pkts, pps=target_pps),
+        mode=api.STLTXCont(pps=target_pps),
         flow_stats=api.STLFlowStats(pg_id=UDP_PG_ID),
     )
 
@@ -129,7 +129,7 @@ def run_udp_measurement(
     duration: float,
     packet_size: int = UDP_PACKET_SIZE_BYTES,
 ) -> UdpRunResult:
-    """Запускает UDP TRex-тест и возвращает counters/процент потерь."""
+    """Запускает UDP TRex-тест фиксированной длительности и возвращает counters/процент потерь."""
     if target_pps <= 0:
         raise ValueError("target_pps must be positive")
     if duration <= 0:
@@ -146,10 +146,11 @@ def run_udp_measurement(
         client.reset(ports=ports)
         configure_l3_mode(client)
         client.remove_all_streams(ports=[CLIENT_PORT])
-        client.add_streams(build_udp_stream(api, target_pps, duration, packet_size), ports=[CLIENT_PORT])
+        client.add_streams(build_udp_stream(api, target_pps, packet_size), ports=[CLIENT_PORT])
         client.clear_stats(ports=ports)
         client.start(ports=[CLIENT_PORT])
-        client.wait_on_traffic(ports=ports)
+        time.sleep(duration)
+        client.stop(ports=[CLIENT_PORT])
         tx_packets, rx_packets = read_udp_counters(client)
         if tx_packets <= 0:
             raise RuntimeError("TRex reported zero transmitted UDP packets")
