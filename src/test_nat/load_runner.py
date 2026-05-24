@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from manage_nat.nat_mode import parse_managed_nat_mode
+from manage_nat.nat_mode import parse_configured_workers, parse_managed_nat_mode
 
 from .config import HostTestConfig, SearchConfig, build_results_dir
 from .results import RunLogger, ensure_directory, write_json
 from .trex.run.udp import UdpRunResult, run_udp_measurement
-from .trex.setup import setup_trex_server
+from .trex.setup import configure_vpp_memif_rx_placement, setup_trex_server
 
 LOG_FILE_NAME = "program.log"
 HISTORY_FILE_NAME = "history.json"
@@ -70,7 +70,7 @@ def run_load_test(
     )
 
     try:
-        topology_changed = ensure_nat_mode(config.nat_mode, logger)
+        topology_changed = ensure_nat_mode(config.nat_mode, config.n_workers, logger)
         ensure_vpp_topology(logger)
         ensure_trex_ready(topology_changed, logger)
         payload = run_boundary_search(
@@ -108,6 +108,8 @@ def log_start_block(
                 f"results_dir: {results_dir}",
                 "",
                 f"nat_mode: {config.nat_mode}",
+                f"n_workers: {format_number(config.n_workers)}",
+                f"flow_count: {format_number(config.flow_count)}",
                 f"packet_size: {format_number(config.packet_size)}",
                 f"target_loss_rate: {format_percent(config.target_loss_rate)}",
                 "",
@@ -129,15 +131,27 @@ def reset_results_dir(results_dir: Path) -> None:
         (results_dir / file_name).unlink(missing_ok=True)
 
 
-def ensure_nat_mode(target_mode: str, logger: RunLogger) -> bool:
-    """Проверяет NAT-режим и возвращает True, если топология пересоздавалась."""
+def ensure_nat_mode(target_mode: str, target_workers: int, logger: RunLogger) -> bool:
+    """Проверяет NAT-режим/число workers и возвращает True, если топология пересоздавалась."""
     current_mode = parse_managed_nat_mode()
-    if current_mode == target_mode:
+    current_workers = parse_configured_workers()
+    if current_mode == target_mode and current_workers == target_workers:
         return False
 
-    logger(f"Переключаем NAT-режим: {current_mode} -> {target_mode}")
+    logger(
+        "Переключаем параметры NAT/VPP: "
+        f"mode {current_mode} -> {target_mode}, "
+        f"n_workers {current_workers} -> {target_workers}"
+    )
     result = subprocess.run(
-        [manage_nat_command(), "switch", target_mode],
+        [
+            manage_nat_command(),
+            "switch",
+            target_mode,
+            "--n_workers",
+            str(target_workers),
+            "--restart",
+        ],
         text=True,
         capture_output=True,
         check=False,
@@ -180,6 +194,8 @@ def ensure_trex_ready(topology_changed: bool, logger: RunLogger) -> None:
         return
     if not trex_links_are_up():
         restart_trex_server("TRex memif links are down", logger)
+        return
+    configure_vpp_memif_rx_placement()
 
 
 def restart_trex_server(reason: str, logger: RunLogger) -> None:
@@ -224,12 +240,15 @@ def run_boundary_search(
         nonlocal step_index
         step_index += 1
         clear_nat_sessions(config.nat_mode, logger)
+        clear_vpp_runtime_counters(logger)
         logger.begin(f"step #{step_index}: target_pps={format_number(target_pps)}")
         try:
             measurement = run_udp_measurement(
                 target_pps=target_pps,
                 duration=search.measurement_sec,
                 packet_size=config.packet_size,
+                flow_count=config.flow_count,
+                warmup_sec=search.warmup_sec,
             )
         except Exception as exc:
             logger.finish(f" -> error={exc}")
@@ -310,6 +329,14 @@ def clear_nat_sessions(nat_mode: str, logger: RunLogger) -> None:
         raise RuntimeError("Не удалось очистить NAT-сессии")
 
 
+def clear_vpp_runtime_counters(logger: RunLogger) -> None:
+    """Очищает VPP runtime counters перед очередной точкой."""
+    result = subprocess.run(["sudo", "vppctl", "clear", "runtime"], text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        log_failed_subprocess("clear-runtime", result, logger)
+        raise RuntimeError("Не удалось очистить VPP runtime counters")
+
+
 def build_history_payload(
     config: HostTestConfig,
     search: SearchConfig,
@@ -322,6 +349,8 @@ def build_history_payload(
         "params": {
             "load_params": {
                 "nat_mode": config.nat_mode,
+                "n_workers": config.n_workers,
+                "flow_count": config.flow_count,
                 "packet_size": config.packet_size,
                 "target_loss_rate": config.target_loss_rate,
             },
@@ -331,7 +360,7 @@ def build_history_payload(
                 "search_max_pps": search.search_max_pps,
                 "search_relative_precision": search.search_relative_precision,
                 "search_pps_precision_delta": precision_delta,
-                "warmup_sec": 0,
+                "warmup_sec": search.warmup_sec,
             },
         },
         "result": [build_step_result(step) for step in steps],
@@ -347,6 +376,8 @@ def build_step_result(step: LoadStep) -> dict[str, Any]:
         "phase": step.phase,
         "target_pps": step.target_pps,
         "passed": step.passed,
+        "measurement_start_epoch": measurement.measurement_start_epoch,
+        "measurement_end_epoch": measurement.measurement_end_epoch,
         "actual_sent_pps": measurement.actual_sent_pps,
         "expected_packets": measurement.expected_packets,
         "received_packets": measurement.received_packets,
@@ -366,6 +397,8 @@ def build_final_step_result(step: LoadStep | None) -> dict[str, Any]:
     payload.pop("step_index", None)
     payload.pop("phase", None)
     payload.pop("passed", None)
+    payload.pop("measurement_start_epoch", None)
+    payload.pop("measurement_end_epoch", None)
     return payload
 
 

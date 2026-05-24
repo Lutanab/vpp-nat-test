@@ -4,7 +4,12 @@ from pathlib import Path
 
 import rich_click as click
 
-from .nat_mode import STARTUP_CONF_PATH, VALID_NAT_MODES, parse_managed_nat_mode
+from .nat_mode import (
+    STARTUP_CONF_PATH,
+    VALID_NAT_MODES,
+    parse_configured_workers,
+    parse_managed_nat_mode,
+)
 from .helpers import PROJECT_ROOT
 from .network.clean import clean_network
 from .network.setup import setup_network
@@ -46,7 +51,13 @@ def show_command(startup_conf: Path) -> None:
             f"Failed to detect the current NAT mode from {startup_conf}. "
             "The managed VPP plugin block may be missing."
         )
-    click.echo(current_mode)
+    workers = parse_configured_workers(startup_conf_path=startup_conf)
+    if workers is None:
+        click.echo(f"nat_mode={current_mode}")
+        click.echo("n_workers=not-set")
+        return
+    click.echo(f"nat_mode={current_mode}")
+    click.echo(f"n_workers={workers}")
 
 
 @app.group("network")
@@ -57,15 +68,23 @@ def network_group() -> None:
 @network_group.command("setup")
 @click.argument("nat_mode", type=click.Choice(VALID_NAT_MODES))
 @click.option(
+    "--n_workers",
+    "--n-workers",
+    type=click.IntRange(min=0, max=7),
+    default=0,
+    show_default=True,
+    help="Количество VPP worker thread(s), 0..7 (corelist-workers от 8-го ядра).",
+)
+@click.option(
     "--project-root",
     type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
     default=PROJECT_ROOT,
     show_default=False,
     help="Корень репозитория.",
 )
-def network_setup_command(nat_mode: str, project_root: Path) -> None:
+def network_setup_command(nat_mode: str, n_workers: int, project_root: Path) -> None:
     """Поднимает сеть и применяет выбранный NAT-режим."""
-    setup_network(project_root=project_root, nat_mode=nat_mode)
+    setup_network(project_root=project_root, nat_mode=nat_mode, n_workers=n_workers)
 
 
 @network_group.command("clean")
@@ -84,6 +103,14 @@ def network_clean_command(project_root: Path) -> None:
 @app.command("switch")
 @click.argument("nat_mode", type=click.Choice(VALID_NAT_MODES))
 @click.option(
+    "--n_workers",
+    "--n-workers",
+    type=click.IntRange(min=0, max=7),
+    default=0,
+    show_default=True,
+    help="Количество VPP worker thread(s), 0..7 (corelist-workers от 8-го ядра).",
+)
+@click.option(
     "--project-root",
     type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
     default=PROJECT_ROOT,
@@ -95,6 +122,11 @@ def network_clean_command(project_root: Path) -> None:
     is_flag=True,
     help="Force the full stop/clean/rebuild/setup/start workflow even if the requested NAT mode is already configured.",
 )
-def switch_command(nat_mode: str, project_root: Path, restart: bool) -> None:
+def switch_command(nat_mode: str, n_workers: int, project_root: Path, restart: bool) -> None:
     """Переключает NAT-режим полным stop/clean/setup/start workflow."""
-    switch_nat_mode(nat_mode=nat_mode, project_root=project_root, restart=restart)
+    switch_nat_mode(
+        nat_mode=nat_mode,
+        n_workers=n_workers,
+        project_root=project_root,
+        restart=restart,
+    )

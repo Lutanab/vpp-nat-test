@@ -27,8 +27,15 @@ NAT_OUTSIDE_IP_CIDR = "10.8.0.1/24"
 UNKNOWN_INPUT_RE = re.compile(r"unknown input|unknown command|parse error", re.IGNORECASE)
 NAT_PLUGIN_LINE_RE = re.compile(r"^\s*plugin\s+nat_plugin\.so\s+\{.*\}\s*$")
 NAT_FO_PLUGIN_LINE_RE = re.compile(r"^\s*plugin\s+nat_fo_plugin\.so\s+\{.*\}\s*$")
+CPU_SECTION_LINE_RE = re.compile(r"^\s*cpu\s*\{\s*$")
+WORKERS_LINE_RE = re.compile(r"^\s*workers\s+\d+\s*$")
+MAIN_CORE_LINE_RE = re.compile(r"^\s*main-core\s+\d+\s*$")
+CORELIST_WORKERS_LINE_RE = re.compile(r"^\s*corelist-workers\s+.+$")
 VPP_READY_TIMEOUT_SECONDS = 25
 VPP_READY_POLL_INTERVAL_SECONDS = 1
+VPP_MAIN_CORE = 7
+VPP_WORKER_CORE_START = 8
+VPP_MAX_WORKERS = 7
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,7 @@ MEMIF_OUTSIDE = MemifEndpoint(
     socket_path="/run/vpp/memif-outside.sock",
     role="master",
 )
+MULTIQUEUE_MEMIF_ENDPOINTS = (MEMIF_INSIDE_A, MEMIF_OUTSIDE)
 
 
 def run_vppctl_command(command: str, description: str) -> str:
@@ -176,6 +184,72 @@ def configure_vpp_nat_plugins_for_mode(nat_mode: str) -> None:
     )
 
 
+def find_section_end(lines: list[str], section_start: int) -> int:
+    """Возвращает индекс закрывающей `}` для секции с `{` на section_start."""
+    balance = 0
+    for index in range(section_start, len(lines)):
+        line = lines[index]
+        balance += line.count("{")
+        balance -= line.count("}")
+        if balance == 0:
+            return index
+    raise RuntimeError(f"Unclosed section in startup.conf starting at line {section_start + 1}")
+
+
+def configure_vpp_workers(n_workers: int) -> None:
+    """Устанавливает `cpu`-параметры VPP в startup.conf."""
+    if n_workers < 0 or n_workers > VPP_MAX_WORKERS:
+        raise ValueError(f"n_workers must be in range 0..{VPP_MAX_WORKERS}")
+
+    corelist_workers = (
+        f"{VPP_WORKER_CORE_START}-{VPP_WORKER_CORE_START + n_workers - 1}"
+        if n_workers > 0
+        else None
+    )
+
+    lines = read_startup_conf().splitlines()
+    cpu_start = -1
+    for index, line in enumerate(lines):
+        if CPU_SECTION_LINE_RE.match(line):
+            cpu_start = index
+            break
+
+    if cpu_start >= 0:
+        cpu_end = find_section_end(lines, cpu_start)
+        body = lines[cpu_start + 1 : cpu_end]
+        cleaned_body = [
+            line
+            for line in body
+            if not WORKERS_LINE_RE.match(line)
+            and not MAIN_CORE_LINE_RE.match(line)
+            and not CORELIST_WORKERS_LINE_RE.match(line)
+        ]
+        cleaned_body.append(f"  main-core {VPP_MAIN_CORE}")
+        if corelist_workers is not None:
+            cleaned_body.append(f"  corelist-workers {corelist_workers}")
+        lines = lines[: cpu_start + 1] + cleaned_body + lines[cpu_end:]
+    else:
+        while lines and lines[-1].strip() == "":
+            lines.pop()
+        lines.extend(
+            [
+                "",
+                "cpu {",
+                f"  main-core {VPP_MAIN_CORE}",
+                *([f"  corelist-workers {corelist_workers}"] if corelist_workers is not None else []),
+                "}",
+                "",
+            ]
+        )
+
+    write_startup_conf("\n".join(lines))
+    click.echo(
+        "  ✓ startup.conf обновлен: "
+        f"main-core={VPP_MAIN_CORE}, "
+        f"corelist-workers={corelist_workers if corelist_workers is not None else 'disabled'}"
+    )
+
+
 def restart_vpp_service() -> None:
     """Перезапускает VPP и дожидается готовности CLI-сокета."""
     if not vpp_service_exists():
@@ -253,8 +327,18 @@ def wait_for_vpp_ready(timeout_seconds: int) -> None:
     raise RuntimeError("\n\n".join(details))
 
 
-def create_memif_endpoint(endpoint: MemifEndpoint) -> None:
+def memif_queue_count_for_endpoint(endpoint: MemifEndpoint, n_workers: int) -> int:
+    """Возвращает количество RX/TX-очередей для memif-интерфейса."""
+    if endpoint in MULTIQUEUE_MEMIF_ENDPOINTS:
+        return max(1, n_workers)
+    return 1
+
+
+def create_memif_endpoint(endpoint: MemifEndpoint, queue_count: int) -> None:
     """Создаёт memif-сокет и memif-интерфейс в VPP."""
+    if queue_count < 1:
+        raise ValueError("memif queue_count must be positive")
+
     run_vppctl_command(
         f"create memif socket id {endpoint.socket_id} filename {endpoint.socket_path}",
         f"Создан memif socket id={endpoint.socket_id}",
@@ -263,10 +347,31 @@ def create_memif_endpoint(endpoint: MemifEndpoint) -> None:
         (
             "create interface memif "
             f"id {endpoint.interface_id} socket-id {endpoint.socket_id} {endpoint.role}"
+            f" rx-queues {queue_count} tx-queues {queue_count}"
         ),
-        f"Создан memif интерфейс {endpoint.interface_name}",
+        f"Создан memif интерфейс {endpoint.interface_name} (queues={queue_count})",
     )
     run_command(with_privileges(["chmod", "666", endpoint.socket_path]))
+
+
+def configure_memif_rx_placement(n_workers: int) -> None:
+    """Раскладывает RX-очереди hot-path memif-интерфейсов по VPP worker threads."""
+    if n_workers <= 0:
+        click.echo("  ✓ RX placement memif-очередей пропущен (worker threads disabled)")
+        return
+
+    for queue_index in range(n_workers):
+        for endpoint in MULTIQUEUE_MEMIF_ENDPOINTS:
+            run_vppctl_command(
+                (
+                    f"set interface rx-placement {endpoint.interface_name} "
+                    f"queue {queue_index} worker {queue_index}"
+                ),
+                (
+                    f"RX queue {queue_index} интерфейса {endpoint.interface_name} "
+                    f"назначена worker {queue_index}"
+                ),
+            )
 
 
 def remove_stale_memif_sockets() -> None:
@@ -363,18 +468,22 @@ def configure_nat_runtime_mode(nat_mode: str, bvi_interface: str) -> None:
     run_vppctl_command("show nat_fo", "Проверка NAT_FO summary")
 
 
-def setup_network(project_root: Path, nat_mode: str) -> None:
+def setup_network(project_root: Path, nat_mode: str, n_workers: int = 0) -> None:
     """Поднимает VPP runtime-топологию memif+BVI и применяет NAT-режим."""
     del project_root  # API-совместимость с другими workflow-функциями.
     mode = ensure_valid_nat_mode(nat_mode)
-    click.echo(f"=== Подготовка сети (nat-mode={mode}) ===")
+    click.echo(f"=== Подготовка сети (nat-mode={mode}, n_workers={n_workers}) ===")
 
     configure_vpp_nat_plugins_for_mode(mode)
+    configure_vpp_workers(n_workers)
     restart_vpp_service()
     remove_stale_memif_sockets()
 
     for endpoint in (MEMIF_INSIDE_A, MEMIF_INSIDE_B, MEMIF_OUTSIDE):
-        create_memif_endpoint(endpoint)
+        create_memif_endpoint(
+            endpoint,
+            queue_count=memif_queue_count_for_endpoint(endpoint, n_workers),
+        )
 
     bvi_interface = create_bvi_interface()
     configure_l2_and_l3(bvi_interface)

@@ -55,7 +55,7 @@ sudo systemctl restart vpp
 Команда принимает обязательный аргумент NAT-режима:
 
 ```bash
-manage-nat network setup <none|nat44|nat_fo>
+manage-nat network setup <none|nat44|nat_fo> [--n_workers N]
 ```
 
 Поддерживаются режимы:
@@ -65,9 +65,12 @@ manage-nat network setup <none|nat44|nat_fo>
 
 Что делает команда автоматически:
 - обновляет в `/etc/vpp/startup.conf` управляемый блок плагинов (`nat_plugin.so` / `nat_fo_plugin.so`);
+- обновляет `cpu`-параметры VPP в `/etc/vpp/startup.conf` (`main-core` и `corelist-workers` через `--n_workers`);
 - перезапускает VPP;
-- поднимает VPP-сетевую топологию (memif + bridge/BVI);
+- поднимает VPP-сетевую топологию (memif + bridge/BVI), создавая по `N` RX/TX-очередей на hot-path memif-интерфейсах при `--n_workers N`;
 - применяет runtime-конфигурацию выбранного NAT-режима.
+
+После подключения TRex к memif-сокетам load-test дополнительно назначает RX-очереди hot-path memif-интерфейсов воркерам 1:1: queue `i` -> worker `i`.
 
 ### `nat_fo` режим
 
@@ -195,3 +198,30 @@ CLI выполняет шаги по порядку:
 - `manage-nat network clean`
 - если выбран `nat_fo`: `cd vpp && make pkg-deb-debug`, затем `dpkg -i build-root/*.deb`
 - `manage-nat network setup <mode>`
+
+## Мониторинг ресурсов (VPP/TRex)
+
+Найти PID процессов:
+
+```bash
+pgrep -af vpp
+pgrep -af t-rex-64
+```
+
+Смотреть их вместе в `htop`:
+
+```bash
+htop -p <PID_VPP>,<PID_TREX>
+```
+
+Проверить, на какие CPU-ядра приземлились потоки VPP:
+
+```bash
+sudo vppctl show threads
+```
+
+Проверить текущую `cpu`-конфигурацию в `startup.conf`:
+
+```bash
+sudo grep -nE "^[[:space:]]*cpu[[:space:]]*\\{|^[[:space:]]*main-core|^[[:space:]]*corelist-workers" /etc/vpp/startup.conf
+```

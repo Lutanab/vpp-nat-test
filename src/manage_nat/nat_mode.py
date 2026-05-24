@@ -10,6 +10,9 @@ MANAGED_BLOCK_END = "# END VPP_NAT_TEST_MANAGED_PLUGINS"
 
 NAT_FO_PLUGIN_RE = re.compile(r"plugin\s+nat_fo_plugin\.so\s+\{\s*(enable|disable)\s*\}")
 NAT44_PLUGIN_RE = re.compile(r"plugin\s+nat_plugin\.so\s+\{\s*(enable|disable)\s*\}")
+CPU_SECTION_START_RE = re.compile(r"^\s*cpu\s*\{\s*$")
+WORKERS_RE = re.compile(r"^\s*workers\s+(\d+)\s*$")
+CORELIST_WORKERS_RE = re.compile(r"^\s*corelist-workers\s+(.+?)\s*$")
 
 
 def ensure_valid_nat_mode(value: str) -> str:
@@ -61,3 +64,64 @@ def parse_managed_nat_mode(startup_conf_path: Path = STARTUP_CONF_PATH) -> str |
     if nat_fo_state == "disable" and nat44_state == "disable":
         return "none"
     return None
+
+
+def parse_configured_workers(startup_conf_path: Path = STARTUP_CONF_PATH) -> int | None:
+    """Считывает число workers из секции `cpu { ... }` startup.conf."""
+    if not startup_conf_path.exists():
+        return None
+
+    lines = startup_conf_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    in_cpu = False
+    brace_balance = 0
+    workers_value: int | None = None
+    corelist_value: str | None = None
+
+    for raw_line in lines:
+        if not in_cpu:
+            if CPU_SECTION_START_RE.match(raw_line):
+                in_cpu = True
+                brace_balance = raw_line.count("{") - raw_line.count("}")
+            continue
+
+        workers_match = WORKERS_RE.match(raw_line)
+        if workers_match is not None:
+            workers_value = int(workers_match.group(1))
+
+        corelist_match = CORELIST_WORKERS_RE.match(raw_line)
+        if corelist_match is not None:
+            corelist_value = corelist_match.group(1).strip()
+
+        brace_balance += raw_line.count("{")
+        brace_balance -= raw_line.count("}")
+        if brace_balance <= 0:
+            if workers_value is not None:
+                return workers_value
+            if corelist_value:
+                return count_workers_from_corelist(corelist_value)
+            return None
+
+    return None
+
+
+def count_workers_from_corelist(corelist: str) -> int | None:
+    """Подсчитывает число ядер в corelist-workers записи (например `8-10,12`)."""
+    total = 0
+    for chunk in corelist.split(","):
+        token = chunk.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_text, end_text = token.split("-", 1)
+            if not start_text.strip().isdigit() or not end_text.strip().isdigit():
+                return None
+            start = int(start_text.strip())
+            end = int(end_text.strip())
+            if end < start:
+                return None
+            total += (end - start + 1)
+        else:
+            if not token.isdigit():
+                return None
+            total += 1
+    return total

@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Workspace tools for the VPP NAT test repository"
 requires-python = ">=3.11"
 dependencies = [
+  "matplotlib>=3.10.9",
   "rich-click>=1.8.6",
 ]
 

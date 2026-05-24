@@ -26,6 +26,9 @@ DEFAULT_REPLY_EVERY = 100
 DEFAULT_VPP_SERVICE_NAME = "vpp.service"
 DEFAULT_SCRAPE_INTERVAL_SEC = 1.0
 DEFAULT_TEST_NAME = "trex_nat_boundary"
+DEFAULT_FLOW_COUNT = 1
+UDP_SPORT_RANGE_START = 10000
+UDP_SPORT_RANGE_END = 65535
 VALID_NAT_MODES = ("none", "nat44", "nat_fo")
 
 
@@ -44,6 +47,8 @@ class SearchConfig:
 @dataclass(slots=True)
 class HostTestConfig:
     nat_mode: str
+    n_workers: int
+    flow_count: int
     packet_size: int
     target_loss_rate: float
     user_vm_ssh_target: str
@@ -91,6 +96,8 @@ def load_test_configs(
 
     config = HostTestConfig(
         nat_mode=ensure_valid_nat_mode(str(require(raw_load_config, "nat_mode"))),
+        n_workers=int(raw_load_config.get("n_workers", 0)),
+        flow_count=int(raw_load_config.get("flow_count", DEFAULT_FLOW_COUNT)),
         packet_size=int(require(raw_load_config, "packet_size")),
         target_loss_rate=float(require(raw_load_config, "target_loss_rate")),
         user_vm_ssh_target=DEFAULT_USER_VM_SSH_TARGET,
@@ -107,7 +114,7 @@ def load_test_configs(
         vpp_service_name=DEFAULT_VPP_SERVICE_NAME,
         scrape_interval_sec=DEFAULT_SCRAPE_INTERVAL_SEC,
         results_root=DEFAULT_RESULTS_ROOT,
-        test_name=DEFAULT_TEST_NAME,
+        test_name=str(raw_load_config.get("test_name") or DEFAULT_TEST_NAME),
     )
     search = SearchConfig(
         warmup_sec=int(raw_search_config.get("warmup_sec", 0)),
@@ -123,6 +130,19 @@ def load_test_configs(
 def validate_config(config: HostTestConfig, search: SearchConfig) -> None:
     if config.packet_size <= 0:
         raise ValueError("packet_size must be positive")
+    if config.n_workers < 0:
+        raise ValueError("n_workers must be non-negative")
+    if config.n_workers > 7:
+        raise ValueError("n_workers must be <= 7")
+    if config.flow_count <= 0:
+        raise ValueError("flow_count must be positive")
+    max_supported_flow_count = UDP_SPORT_RANGE_END - UDP_SPORT_RANGE_START + 1
+    if config.flow_count > max_supported_flow_count:
+        raise ValueError(
+            "flow_count is too high for configured UDP sport range "
+            f"{UDP_SPORT_RANGE_START}-{UDP_SPORT_RANGE_END}; "
+            f"max supported flow_count is {max_supported_flow_count}"
+        )
     if config.target_loss_rate < 0:
         raise ValueError("target_loss_rate must be non-negative")
     if config.reply_every <= 0:
@@ -144,6 +164,8 @@ def validate_config(config: HostTestConfig, search: SearchConfig) -> None:
 def build_results_dir(config: HostTestConfig) -> Path:
     segments = (
         ("test_name", config.test_name),
+        ("flow_count", config.flow_count),
+        ("n_workers", config.n_workers),
         ("target_loss_rate", config.target_loss_rate),
         ("packet_size", config.packet_size),
         ("nat_mode", config.nat_mode),

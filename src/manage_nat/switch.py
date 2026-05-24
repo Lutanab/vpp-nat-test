@@ -4,7 +4,7 @@ from pathlib import Path
 
 import rich_click as click
 
-from .nat_mode import parse_managed_nat_mode
+from .nat_mode import parse_configured_workers, parse_managed_nat_mode
 from .helpers import run_command, with_privileges
 from .network.clean import clean_network
 from .network.setup import setup_network
@@ -28,15 +28,21 @@ def rebuild_vpp_packages(project_root: Path) -> None:
     run_command(with_privileges(["dpkg", "-i", *[str(pkg) for pkg in deb_packages]]))
 
 
-def switch_nat_mode(nat_mode: str, project_root: Path, restart: bool) -> None:
+def switch_nat_mode(nat_mode: str, n_workers: int, project_root: Path, restart: bool) -> None:
     """Выполняет полный workflow переключения NAT-режима."""
-    click.echo(f"=== Switching NAT mode to: {nat_mode} ===")
+    click.echo(f"=== Switching NAT mode to: {nat_mode} (n_workers={n_workers}) ===")
 
     current_mode = parse_managed_nat_mode()
+    current_workers = parse_configured_workers()
     if current_mode is not None:
         click.echo(f"Current managed NAT mode: {current_mode}")
-    if current_mode == nat_mode and not restart:
-        click.echo("\n✓ NAT mode is already configured. Use --restart to rebuild/recreate the runtime topology.")
+    if current_workers is not None:
+        click.echo(f"Current configured n_workers: {current_workers}")
+    if current_mode == nat_mode and current_workers == n_workers and not restart:
+        click.echo(
+            "\n✓ NAT mode and n_workers are already configured. "
+            "Use --restart to rebuild/recreate the runtime topology."
+        )
         return
     if restart:
         click.echo("Restart requested: forcing the full workflow.")
@@ -46,6 +52,6 @@ def switch_nat_mode(nat_mode: str, project_root: Path, restart: bool) -> None:
     if nat_mode == "nat_fo":
         rebuild_vpp_packages(project_root)
 
-    setup_network(project_root=project_root, nat_mode=nat_mode)
+    setup_network(project_root=project_root, nat_mode=nat_mode, n_workers=n_workers)
 
     click.echo("\n✓ NAT mode successfully switched and runtime topology is up")

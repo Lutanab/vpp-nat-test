@@ -1,3 +1,6 @@
+test_name: trex_nat_boundary
 nat_mode: nat_fo
+n_workers: 1
+flow_count: 1
 packet_size: 512
 target_loss_rate: 0.0001

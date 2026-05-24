@@ -12,11 +12,13 @@ import rich_click as click
 
 from manage_nat.config import TREX_INSTALL_BASE_DIR, TREX_SERVER_BINARY_NAME, TREX_SERVER_LINK_PATH
 from manage_nat.helpers import PROJECT_ROOT
+from manage_nat.nat_mode import parse_configured_workers
 from manage_nat.network.setup import (
     MEMIF_INSIDE_A,
     MEMIF_OUTSIDE,
     NAT_INSIDE_BVI_IP_CIDR,
     NAT_OUTSIDE_IP_CIDR,
+    configure_memif_rx_placement,
 )
 
 TREX_CFG_PATH = PROJECT_ROOT / "configs" / "trex" / "trex_cfg.yaml"
@@ -26,10 +28,12 @@ TREX_RPC_HOST = "127.0.0.1"
 TREX_RPC_PORT = 4501
 TREX_READY_TIMEOUT_SECONDS = 30
 TREX_READY_POLL_INTERVAL_SECONDS = 1
+VPP_MEMIF_PLACEMENT_TIMEOUT_SECONDS = 10
+VPP_MEMIF_PLACEMENT_POLL_INTERVAL_SECONDS = 0.5
 TREX_INSIDE_A_IP = "10.8.1.2"
 TREX_OUTSIDE_IP = "10.8.0.2"
 TREX_PORT_BANDWIDTH_GB = 200
-TREX_LIMIT_MEMORY_MB = 1024
+TREX_LIMIT_MEMORY_MB = 1536
 TREX_MBUF_FACTOR = "0.2"
 
 
@@ -228,12 +232,15 @@ def start_trex_server(trex_binary: Path, config_path: Path) -> int:
     """Запускает TRex server в фоне и возвращает PID."""
     TREX_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     trex_workdir = trex_binary.parent
+    trex_data_cores = max(1, parse_configured_workers() or 0)
     log_file = TREX_LOG_PATH.open("ab")
     process = subprocess.Popen(
         [
             "sudo",
             str(trex_binary),
             "-i",
+            "-c",
+            str(trex_data_cores),
             "--cfg",
             str(config_path.resolve()),
             "--mbuf-factor",
@@ -250,6 +257,27 @@ def start_trex_server(trex_binary: Path, config_path: Path) -> int:
     return process.pid
 
 
+def configure_vpp_memif_rx_placement() -> None:
+    """Применяет RX placement после подключения TRex к memif-сокетам."""
+    n_workers = parse_configured_workers()
+    if not n_workers:
+        click.echo("  ✓ RX placement memif-очередей пропущен (worker threads disabled)")
+        return
+
+    deadline = time.monotonic() + VPP_MEMIF_PLACEMENT_TIMEOUT_SECONDS
+    last_error: RuntimeError | None = None
+    while time.monotonic() < deadline:
+        try:
+            configure_memif_rx_placement(n_workers)
+            return
+        except RuntimeError as exc:
+            last_error = exc
+            time.sleep(VPP_MEMIF_PLACEMENT_POLL_INTERVAL_SECONDS)
+
+    details = f": {last_error}" if last_error is not None else ""
+    raise RuntimeError(f"Timed out waiting for VPP memif queues before RX placement{details}")
+
+
 def setup_trex_server(config_path: Path = TREX_CFG_PATH) -> None:
     """Деплоит TRex server для memif-топологии VPP."""
     click.echo("=== Деплой TRex server ===")
@@ -258,9 +286,11 @@ def setup_trex_server(config_path: Path = TREX_CFG_PATH) -> None:
     write_trex_config(config_path)
     stop_existing_trex_server()
     trex_pid = start_trex_server(trex_binary=trex_binary, config_path=config_path)
+    configure_vpp_memif_rx_placement()
 
     click.echo(f"  ✓ Конфиг TRex записан: {config_path}")
     click.echo(f"  ✓ TRex binary: {trex_binary}")
+    click.echo(f"  ✓ TRex dataplane cores per port pair: {max(1, parse_configured_workers() or 0)}")
     click.echo(f"  ✓ TRex server запущен: pid={trex_pid}, rpc={TREX_RPC_HOST}:{TREX_RPC_PORT}")
     click.echo(f"  ✓ TRex log: {TREX_LOG_PATH}")
     for port in TREX_PORTS:

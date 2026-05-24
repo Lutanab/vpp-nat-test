@@ -1,3 +1,4 @@
+warmup_sec: 3
 measurement_sec: 60
 search_initial_pps: 100000
 search_max_pps: 10000000

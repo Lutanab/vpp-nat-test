@@ -1,6 +1,6 @@
 - port_limit: 2
   version: 2
-  limit_memory: 1024
+  limit_memory: 1536
   port_bandwidth_gb: 200
   interfaces:
     - "--vdev=net_memif0,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-inside-a.sock"
