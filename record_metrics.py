@@ -20,7 +20,7 @@ MEMIF_SHOW_COMMANDS = (
 
 THREAD_HEADER_RE = re.compile(r"^Thread\s+\d+\s+(?P<thread>\S+)")
 RUNTIME_ROW_RE = re.compile(r"^(?P<node>\S+)\s+\S+\s+(?P<calls>\d+)\s+(?P<vectors>\d+)\b")
-MEMIF20_TX_NODE_RE = re.compile(r"^memif20/\d+-tx$")
+MEMIF_TX_NODE_RE = re.compile(r"^memif(?:10|20)/\d+-tx$")
 
 INTERFACE_RE = re.compile(r"^interface\s+(?P<ifname>\S+)$")
 RING_RE = re.compile(r"^(?P<direction>master-to-slave|slave-to-master)\s+ring\s+(?P<ring>\d+):$")
@@ -103,7 +103,7 @@ def parse_runtime_rows(output: str) -> list[dict[str, Any]]:
             continue
 
         node = row_match.group("node")
-        if node != "memif-input" and MEMIF20_TX_NODE_RE.match(node) is None:
+        if node != "memif-input" and MEMIF_TX_NODE_RE.match(node) is None:
             continue
 
         rows.append(

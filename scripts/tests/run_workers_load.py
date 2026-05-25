@@ -10,10 +10,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOAD_CONFIG_PATH = REPO_ROOT / "configs" / "loadtest" / "load" / "test_config.yaml"
 TEST_NAT = REPO_ROOT / ".venv" / "bin" / "test-nat"
-WORKER_COUNTS = range(1, 6)
+WORKER_COUNTS = range(1, 5)
 N_WORKERS_RE = re.compile(r"^(\s*n_workers\s*:\s*)\d+(\s*)$", re.MULTILINE)
 NAT_MODE_RE = re.compile(r"^(\s*nat_mode\s*:\s*)\S+(\s*)$", re.MULTILINE)
-NAT_MODE = "nat_fo"
+NAT_MODE = "none"
 
 
 def set_n_workers(n_workers: int) -> None:
