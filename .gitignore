@@ -3,7 +3,7 @@ virtual_machines/configs/*/meta-data.yaml
 
 tmp/
 results/
-results copy/
+results_copy/
 vmstat_logs/
 configs/loadtest/load/test_config.yaml
 configs/loadtest/search/test_config.yaml

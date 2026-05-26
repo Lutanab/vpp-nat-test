@@ -99,6 +99,14 @@ def format_pps(value: float | None) -> str:
     return f"{value:.15g}"
 
 
+def infer_test_name(results_dir: Path) -> str:
+    """Infer displayed test_name from a result directory path."""
+    for part in reversed(results_dir.parts):
+        if part.startswith("test_name_"):
+            return part.removeprefix("test_name_")
+    return results_dir.name
+
+
 def main() -> int:
     args = parse_args()
     tsv_output = args.tsv_output or args.output.with_suffix(".tsv")
@@ -128,7 +136,7 @@ def main() -> int:
 
         plt.plot(xs, ys, marker="o", linewidth=2, label=mode, color=NAT_MODE_COLORS[mode])
 
-    plt.title(f"{TEST_NAME}: PPS vs Number of Workers ({args.pps_key})")
+    plt.title(f"{infer_test_name(args.results_dir)}: PPS vs Number of Workers ({args.pps_key})")
     plt.xlabel("n_workers")
     plt.ylabel("pps")
     plt.grid(True, linestyle="--", alpha=0.5)
