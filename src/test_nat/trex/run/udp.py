@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 import sys
 import time
 import warnings
@@ -17,6 +18,7 @@ from ..setup import TREX_INSIDE_A_IP, TREX_OUTSIDE_IP
 CLIENT_PORT = 0
 SERVER_PORT = 1
 UDP_PG_ID = 10
+UDP_REVERSE_PG_ID = 20
 UDP_PACKET_SIZE_BYTES = 64
 UDP_SRC_PORT = 12345
 UDP_DST_PORT = 5001
@@ -183,6 +185,152 @@ def build_udp_streams(
         pg_ids.append(pg_id)
         next_sport += 0 if flow_count == 1 else stream_flow_count
     return streams, tuple(pg_ids)
+
+
+def build_udp_burst_stream(
+    api: Any,
+    total_pkts: int,
+    pps: int,
+    packet_size: int = UDP_PACKET_SIZE_BYTES,
+    flow_count: int = 1,
+    udp_sport_start: int | None = None,
+    pg_id: int = UDP_PG_ID,
+    core_id: int = -1,
+    name: str = "udp_burst_inside_a_to_outside",
+) -> Any:
+    """Собирает UDP burst, где каждый packet соответствует одному source-port flow."""
+    if total_pkts <= 0:
+        raise ValueError("total_pkts must be positive")
+    default_sport = UDP_SRC_PORT if flow_count == 1 else UDP_SPORT_RANGE_START
+    sport_min = default_sport if udp_sport_start is None else udp_sport_start
+    sport_max = sport_min + flow_count - 1
+    if flow_count > 1 and sport_max > UDP_SPORT_RANGE_END:
+        raise ValueError(f"UDP source port range exceeds {UDP_SPORT_RANGE_END}")
+
+    base_packet = (
+        api.Ether()
+        / api.IP(src=TREX_INSIDE_A_IP, dst=TREX_OUTSIDE_IP)
+        / api.UDP(sport=sport_min, dport=UDP_DST_PORT, chksum=0)
+    )
+    padding_size = max(0, packet_size - len(base_packet))
+    packet = base_packet / (b"x" * padding_size)
+
+    vm = None
+    if flow_count > 1:
+        vm = [
+            api.STLVmFlowVar(
+                name="udp_sport",
+                min_value=sport_min,
+                max_value=sport_max,
+                size=2,
+                op="inc",
+                split_to_cores=False,
+            ),
+            api.STLVmWrFlowVar(fv_name="udp_sport", pkt_offset="UDP.sport"),
+        ]
+
+    return api.STLStream(
+        name=name,
+        packet=api.STLPktBuilder(pkt=packet, vm=vm),
+        mode=api.STLTXSingleBurst(total_pkts=total_pkts, pps=pps),
+        flow_stats=api.STLFlowStats(pg_id=pg_id),
+        core_id=core_id,
+    )
+
+
+def build_udp_burst_streams(
+    api: Any,
+    flow_count: int,
+    packet_size: int = UDP_PACKET_SIZE_BYTES,
+    trex_data_cores: int = 1,
+    duration_sec: float = 1,
+) -> tuple[list[Any], tuple[int, ...]]:
+    """Собирает inside->outside UDP burst stream-ы для заданного числа flows."""
+    if flow_count <= 0:
+        raise ValueError("flow_count must be positive")
+    resolve_udp_sport_max(flow_count)
+
+    stream_count = 1 if flow_count == 1 else min(trex_data_cores, flow_count)
+    flows_by_stream = [1] * stream_count if flow_count == 1 else split_evenly(flow_count, stream_count)
+
+    streams: list[Any] = []
+    pg_ids: list[int] = []
+    next_sport = UDP_SPORT_RANGE_START
+    for stream_index, stream_flow_count in enumerate(flows_by_stream):
+        pg_id = UDP_PG_ID + stream_index
+        sport_start = None if flow_count == 1 else next_sport
+        pps = burst_pps(stream_flow_count, duration_sec)
+        streams.append(
+            build_udp_burst_stream(
+                api=api,
+                total_pkts=stream_flow_count,
+                pps=pps,
+                packet_size=packet_size,
+                flow_count=stream_flow_count,
+                udp_sport_start=sport_start,
+                pg_id=pg_id,
+                core_id=stream_index,
+                name=f"udp_burst_inside_a_to_outside_{stream_index}",
+            )
+        )
+        pg_ids.append(pg_id)
+        next_sport += 0 if flow_count == 1 else stream_flow_count
+    return streams, tuple(pg_ids)
+
+
+def build_udp_reverse_burst_stream(
+    api: Any,
+    dst_ip: str,
+    dst_port_start: int,
+    flow_count: int,
+    packet_size: int = UDP_PACKET_SIZE_BYTES,
+    duration_sec: float = 1,
+    pg_id: int = UDP_REVERSE_PG_ID,
+    core_id: int = -1,
+    name: str = "udp_burst_outside_to_observed_mapping",
+) -> Any:
+    """Собирает outside->observed UDP burst для проверки dataplane mapping после restart."""
+    if flow_count <= 0:
+        raise ValueError("flow_count must be positive")
+
+    base_packet = (
+        api.Ether()
+        / api.IP(src=TREX_OUTSIDE_IP, dst=dst_ip)
+        / api.UDP(sport=UDP_DST_PORT, dport=dst_port_start, chksum=0)
+    )
+    padding_size = max(0, packet_size - len(base_packet))
+    packet = base_packet / (b"x" * padding_size)
+
+    vm = None
+    if flow_count > 1:
+        vm = [
+            api.STLVmFlowVar(
+                name="udp_dport",
+                min_value=dst_port_start,
+                max_value=dst_port_start + flow_count - 1,
+                size=2,
+                op="inc",
+                split_to_cores=False,
+            ),
+            api.STLVmWrFlowVar(fv_name="udp_dport", pkt_offset="UDP.dport"),
+        ]
+
+    return api.STLStream(
+        name=name,
+        packet=api.STLPktBuilder(pkt=packet, vm=vm),
+        mode=api.STLTXSingleBurst(total_pkts=flow_count, pps=burst_pps(flow_count, duration_sec)),
+        flow_stats=api.STLFlowStats(pg_id=pg_id),
+        core_id=core_id,
+    )
+
+
+def burst_pps(packet_count: int, duration_sec: float) -> int:
+    """Подбирает pps так, чтобы burst примерно уложился в duration_sec."""
+    if packet_count <= 0:
+        raise ValueError("packet_count must be positive")
+    if duration_sec <= 0:
+        return packet_count
+    return max(1, math.ceil(packet_count / duration_sec))
 
 
 def extract_total_counter(flow_stats: dict[str, Any], counter_name: str) -> int:
