@@ -1,0 +1,30 @@
+{
+  "params": {
+    "load_params": {
+      "nat_mode": "none",
+      "n_workers": 5,
+      "flow_count": 512,
+      "packet_size": 64,
+      "target_loss_rate": 0.001
+    },
+    "search_params": {
+      "measurement_sec": 25,
+      "search_initial_pps": 600000,
+      "search_max_pps": 100000000,
+      "search_relative_precision": 0.005,
+      "search_pps_precision_delta": 3000,
+      "warmup_sec": 5
+    }
+  },
+  "result": {
+    "target_pps": 1272656,
+    "actual_sent_pps": 1271672.52,
+    "expected_packets": 31816400,
+    "received_packets": 31791976,
+    "tx_packets": 31791813,
+    "rx_packets": 31791976,
+    "lost_packets": 24424,
+    "loss_rate": 0.0007676544172187928,
+    "loss_percent": 0.07676544172187928
+  }
+}

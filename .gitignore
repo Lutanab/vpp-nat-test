@@ -2,7 +2,6 @@ virtual_machines/storage
 virtual_machines/configs/*/meta-data.yaml
 
 tmp/
-results/
 results_copy/
 vmstat_logs/
 configs/loadtest/load/test_config.yaml

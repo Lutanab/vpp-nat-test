@@ -1,0 +1,41 @@
+2026-05-26T14:00:44Z ##################################################
+НАЧАЛО TRex load-test
+
+load_config: /home/zero/projects/vpp-nat-test/configs/loadtest/load/test_config.yaml
+search_config: /home/zero/projects/vpp-nat-test/configs/loadtest/search/test_config.yaml
+results_dir: /home/zero/projects/vpp-nat-test/results/test_name_scalability_by_workers/flow_count_512/n_workers_2/target_loss_rate_0p001/packet_size_64/nat_mode_none
+
+nat_mode: none
+n_workers: 2
+flow_count: 512
+packet_size: 64
+target_loss_rate: 0.100000%
+
+measurement_sec: 25
+search_initial_pps: 600.000
+search_max_pps: 100.000.000
+search_relative_precision: 0.500000%
+search_pps_precision_delta: 3.000
+
+2026-05-26T14:00:44Z Переключаем параметры NAT/VPP: mode none -> none, n_workers 1 -> 2
+2026-05-26T14:00:45Z Перезапускаем TRex server: VPP topology changed after NAT mode switch
+2026-05-26T14:00:50Z ##################################################
+PHASE 1/2: exponential search
+##################################################
+2026-05-26T14:00:50Z step #1: target_pps=600.000 -> loss=0.000000%, expected=15.000.911, received=15.000.944, loss=0 PASSED
+2026-05-26T14:01:21Z step #2: target_pps=1.200.000 -> loss=0.000000%, expected=30.001.907, received=30.002.016, loss=0 PASSED
+2026-05-26T14:01:52Z step #3: target_pps=2.400.000 -> loss=12.457383%, expected=60.000.000, received=52.525.570, loss=7.474.430 FAILED
+2026-05-26T14:02:22Z ##################################################
+PHASE 2/2: binary search; left_pps=1.200.000, right_pps=2.400.000
+##################################################
+2026-05-26T14:02:22Z step #4: target_pps=1.800.000 -> loss=0.004631%, expected=45.000.000, received=44.997.916, loss=2.084 PASSED
+2026-05-26T14:02:53Z step #5: target_pps=2.100.000 -> loss=0.536922%, expected=52.500.000, received=52.218.116, loss=281.884 FAILED
+2026-05-26T14:03:23Z step #6: target_pps=1.950.000 -> loss=0.028704%, expected=48.750.000, received=48.736.007, loss=13.993 PASSED
+2026-05-26T14:03:54Z step #7: target_pps=2.025.000 -> loss=0.038212%, expected=50.625.000, received=50.605.655, loss=19.345 PASSED
+2026-05-26T14:04:24Z step #8: target_pps=2.062.500 -> loss=0.014357%, expected=51.562.500, received=51.555.097, loss=7.403 PASSED
+2026-05-26T14:04:55Z step #9: target_pps=2.081.250 -> loss=0.015231%, expected=52.031.250, received=52.023.325, loss=7.925 PASSED
+2026-05-26T14:05:25Z step #10: target_pps=2.090.625 -> loss=0.093911%, expected=52.265.625, received=52.216.542, loss=49.083 PASSED
+2026-05-26T14:05:56Z step #11: target_pps=2.095.312 -> loss=0.090516%, expected=52.382.800, received=52.335.385, loss=47.415 PASSED
+2026-05-26T14:06:26Z step #12: target_pps=2.097.656 -> loss=0.181648%, expected=52.441.400, received=52.346.141, loss=95.259 FAILED
+2026-05-26T14:06:57Z Результаты сохранены: /home/zero/projects/vpp-nat-test/results/test_name_scalability_by_workers/flow_count_512/n_workers_2/target_loss_rate_0p001/packet_size_64/nat_mode_none/history.json, /home/zero/projects/vpp-nat-test/results/test_name_scalability_by_workers/flow_count_512/n_workers_2/target_loss_rate_0p001/packet_size_64/nat_mode_none/result.json
+2026-05-26T14:06:57Z Готово: result=/home/zero/projects/vpp-nat-test/results/test_name_scalability_by_workers/flow_count_512/n_workers_2/target_loss_rate_0p001/packet_size_64/nat_mode_none/result.json, history=/home/zero/projects/vpp-nat-test/results/test_name_scalability_by_workers/flow_count_512/n_workers_2/target_loss_rate_0p001/packet_size_64/nat_mode_none/history.json
