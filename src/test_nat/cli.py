@@ -6,6 +6,7 @@ from pathlib import Path
 import rich_click as click
 
 from .config import load_test_configs
+from .failover.run import run_failover_profile, run_failover_simple_tcp
 from .load_runner import LoadSearchError, run_load_test
 from .trex.run.simple import CapturedTcpPacket, SimpleTcpTestResult, run_simple_tcp_test
 from .trex.run.udp import run_udp_test
@@ -115,6 +116,23 @@ def run_load_command(
         )
     except LoadSearchError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@run_group.group("failover")
+def run_failover_group() -> None:
+    """Run VPP restart failover checks."""
+
+
+@run_failover_group.command("simple-tcp")
+def run_failover_simple_tcp_command() -> None:
+    """Prepare and run the simple TCP failover scenario."""
+    run_failover_simple_tcp()
+
+
+@run_failover_group.command("profile")
+def run_failover_profile_command() -> None:
+    """Run the profile failover scenario."""
+    run_failover_profile()
 
 
 def print_simple_tcp_result(result: SimpleTcpTestResult) -> None:

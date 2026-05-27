@@ -31,6 +31,7 @@ CPU_SECTION_LINE_RE = re.compile(r"^\s*cpu\s*\{\s*$")
 WORKERS_LINE_RE = re.compile(r"^\s*workers\s+\d+\s*$")
 MAIN_CORE_LINE_RE = re.compile(r"^\s*main-core\s+\d+\s*$")
 CORELIST_WORKERS_LINE_RE = re.compile(r"^\s*corelist-workers\s+.+$")
+FAILOVER_STARTUP_CONFIG_RE = re.compile(r"^\s*(startup-config|exec)\s+.*nat_fo_topology\.vpp\s*$")
 VPP_READY_TIMEOUT_SECONDS = 25
 VPP_READY_POLL_INTERVAL_SECONDS = 1
 VPP_MAIN_CORE = 7
@@ -155,6 +156,16 @@ def remove_nat_plugin_lines(lines: list[str]) -> list[str]:
             continue
         result.append(line)
     return result
+
+
+def disable_failover_startup_topology() -> None:
+    """Отключает failover startup topology, чтобы normal setup не конфликтовал с runtime CLI."""
+    lines = read_startup_conf().splitlines()
+    cleaned = [line for line in lines if not FAILOVER_STARTUP_CONFIG_RE.match(line)]
+    if cleaned == lines:
+        return
+    write_startup_conf("\n".join(cleaned))
+    click.echo("  ✓ failover startup topology отключена для normal network setup")
 
 
 def configure_vpp_nat_plugins_for_mode(nat_mode: str) -> None:
@@ -474,6 +485,7 @@ def setup_network(project_root: Path, nat_mode: str, n_workers: int = 0) -> None
     mode = ensure_valid_nat_mode(nat_mode)
     click.echo(f"=== Подготовка сети (nat-mode={mode}, n_workers={n_workers}) ===")
 
+    disable_failover_startup_topology()
     configure_vpp_nat_plugins_for_mode(mode)
     configure_vpp_workers(n_workers)
     restart_vpp_service()

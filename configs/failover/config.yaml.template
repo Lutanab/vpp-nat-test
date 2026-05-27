@@ -1,0 +1,7 @@
+test_name: simple_tcp
+nat_mode: none
+n_workers: 1
+flow_count: 512
+packet_size: 64
+warmup_sec: 10
+waiting_sec: 10

@@ -1,0 +1,19 @@
+create memif socket id 10 filename /run/vpp/memif-inside-a.sock
+create interface memif id 0 socket-id 10 slave no-zero-copy rx-queues 1 tx-queues 1
+create memif socket id 11 filename /run/vpp/memif-inside-b.sock
+create interface memif id 0 socket-id 11 slave no-zero-copy rx-queues 1 tx-queues 1
+create memif socket id 20 filename /run/vpp/memif-outside.sock
+create interface memif id 0 socket-id 20 slave no-zero-copy rx-queues 1 tx-queues 1
+
+create loopback interface
+create bridge-domain 10
+set interface l2 bridge memif10/0 10
+set interface l2 bridge memif11/0 10
+set interface l2 bridge loop0 10 bvi
+set interface ip address loop0 10.8.1.1/24
+set interface ip address memif20/0 10.8.0.1/24
+
+set interface state memif10/0 up
+set interface state memif11/0 up
+set interface state memif20/0 up
+set interface state loop0 up
