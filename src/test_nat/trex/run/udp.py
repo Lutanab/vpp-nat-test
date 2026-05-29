@@ -11,9 +11,10 @@ from typing import Any
 
 from manage_nat.config import TREX_INSTALL_BASE_DIR
 from manage_nat.nat_mode import parse_configured_workers
+from manage_nat.network.setup import NAT_INSIDE_IP_CIDR, NAT_OUTSIDE_IP_CIDR
 
 from ...config import UDP_SPORT_RANGE_END, UDP_SPORT_RANGE_START
-from ..setup import TREX_INSIDE_A_IP, TREX_OUTSIDE_IP
+from ..setup import TREX_INSIDE_A_IP, TREX_OUTSIDE_IP, cidr_ip
 
 CLIENT_PORT = 0
 SERVER_PORT = 1
@@ -378,8 +379,8 @@ def configure_l3_mode(client: Any) -> None:
     ports = [CLIENT_PORT, SERVER_PORT]
     client.set_service_mode(ports=ports, enabled=True)
     try:
-        client.set_l3_mode(port=CLIENT_PORT, src_ipv4=TREX_INSIDE_A_IP, dst_ipv4="10.8.1.1")
-        client.set_l3_mode(port=SERVER_PORT, src_ipv4=TREX_OUTSIDE_IP, dst_ipv4="10.8.0.1")
+        client.set_l3_mode(port=CLIENT_PORT, src_ipv4=TREX_INSIDE_A_IP, dst_ipv4=cidr_ip(NAT_INSIDE_IP_CIDR))
+        client.set_l3_mode(port=SERVER_PORT, src_ipv4=TREX_OUTSIDE_IP, dst_ipv4=cidr_ip(NAT_OUTSIDE_IP_CIDR))
     finally:
         client.set_service_mode(ports=ports, enabled=False)
 

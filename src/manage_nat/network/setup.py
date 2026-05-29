@@ -17,12 +17,9 @@ from ..nat_mode import (
 )
 
 VPP_SERVICE_NAME = "vpp.service"
-BRIDGE_DOMAIN_ID = 10
 NAT44_MAX_SESSIONS = 10000
 NAT_FO_PUBLIC_ADDR = "10.8.0.1"
-NAT_FO_PORT_RANGE_START = 20000
-NAT_FO_PORT_RANGE_END = 40000
-NAT_INSIDE_BVI_IP_CIDR = "10.8.1.1/24"
+NAT_INSIDE_IP_CIDR = "10.8.1.1/24"
 NAT_OUTSIDE_IP_CIDR = "10.8.0.1/24"
 UNKNOWN_INPUT_RE = re.compile(r"unknown input|unknown command|parse error", re.IGNORECASE)
 NAT_PLUGIN_LINE_RE = re.compile(r"^\s*plugin\s+nat_plugin\.so\s+\{.*\}\s*$")
@@ -60,12 +57,6 @@ MEMIF_INSIDE_A = MemifEndpoint(
     socket_path="/run/vpp/memif-inside-a.sock",
     role="master",
 )
-MEMIF_INSIDE_B = MemifEndpoint(
-    socket_id=11,
-    interface_id=0,
-    socket_path="/run/vpp/memif-inside-b.sock",
-    role="master",
-)
 MEMIF_OUTSIDE = MemifEndpoint(
     socket_id=20,
     interface_id=0,
@@ -73,6 +64,7 @@ MEMIF_OUTSIDE = MemifEndpoint(
     role="master",
 )
 MULTIQUEUE_MEMIF_ENDPOINTS = (MEMIF_INSIDE_A, MEMIF_OUTSIDE)
+STALE_MEMIF_SOCKET_PATHS = ("/run/vpp/memif-inside-b.sock",)
 
 
 def run_vppctl_command(command: str, description: str) -> str:
@@ -387,37 +379,17 @@ def configure_memif_rx_placement(n_workers: int) -> None:
 
 def remove_stale_memif_sockets() -> None:
     """Удаляет старые memif-сокеты перед пересозданием интерфейсов."""
-    for endpoint in (MEMIF_INSIDE_A, MEMIF_INSIDE_B, MEMIF_OUTSIDE):
+    for endpoint in (MEMIF_INSIDE_A, MEMIF_OUTSIDE):
         run_command(with_privileges(["rm", "-f", endpoint.socket_path]))
+    for socket_path in STALE_MEMIF_SOCKET_PATHS:
+        run_command(with_privileges(["rm", "-f", socket_path]))
 
 
-def create_bvi_interface() -> str:
-    """Создает loopback и возвращает его имя (будет использоваться как BVI)."""
-    output = run_vppctl_command("create loopback interface", "Создан loopback интерфейс для BVI")
-    for token in reversed(output.split()):
-        if token.startswith("loop"):
-            return token
-    raise RuntimeError(f"Failed to parse BVI interface name from output: {output}")
-
-
-def configure_l2_and_l3(bvi_interface: str) -> None:
-    """Собирает L2/L3-часть топологии: inside-bridge + BVI + outside."""
-    run_vppctl_command(f"create bridge-domain {BRIDGE_DOMAIN_ID}", f"Создан bridge-domain {BRIDGE_DOMAIN_ID}")
+def configure_l3_interfaces() -> None:
+    """Назначает IP-адреса напрямую inside/outside memif-интерфейсам."""
     run_vppctl_command(
-        f"set interface l2 bridge {MEMIF_INSIDE_A.interface_name} {BRIDGE_DOMAIN_ID}",
-        "Inside A добавлен в bridge-domain",
-    )
-    run_vppctl_command(
-        f"set interface l2 bridge {MEMIF_INSIDE_B.interface_name} {BRIDGE_DOMAIN_ID}",
-        "Inside B добавлен в bridge-domain",
-    )
-    run_vppctl_command(
-        f"set interface l2 bridge {bvi_interface} {BRIDGE_DOMAIN_ID} bvi",
-        "BVI добавлен в bridge-domain",
-    )
-    run_vppctl_command(
-        f"set interface ip address {bvi_interface} {NAT_INSIDE_BVI_IP_CIDR}",
-        f"BVI получил IP {NAT_INSIDE_BVI_IP_CIDR}",
+        f"set interface ip address {MEMIF_INSIDE_A.interface_name} {NAT_INSIDE_IP_CIDR}",
+        f"Inside memif получил IP {NAT_INSIDE_IP_CIDR}",
     )
     run_vppctl_command(
         f"set interface ip address {MEMIF_OUTSIDE.interface_name} {NAT_OUTSIDE_IP_CIDR}",
@@ -425,24 +397,23 @@ def configure_l2_and_l3(bvi_interface: str) -> None:
     )
 
 
-def set_interfaces_up(bvi_interface: str) -> None:
+def set_interfaces_up() -> None:
     """Поднимает все интерфейсы стенда."""
     interfaces = [
         MEMIF_INSIDE_A.interface_name,
-        MEMIF_INSIDE_B.interface_name,
         MEMIF_OUTSIDE.interface_name,
-        bvi_interface,
     ]
     for iface in interfaces:
         run_vppctl_command(f"set interface state {iface} up", f"Поднят интерфейс {iface}")
 
 
-def configure_nat_runtime_mode(nat_mode: str, bvi_interface: str) -> None:
+def configure_nat_runtime_mode(nat_mode: str) -> None:
     """Применяет runtime-конфигурацию NAT для already-up топологии."""
     if nat_mode == "none":
         click.echo("  ✓ NAT runtime-конфигурация пропущена (режим none)")
         return
 
+    inside_iface = MEMIF_INSIDE_A.interface_name
     outside_iface = MEMIF_OUTSIDE.interface_name
     if nat_mode == "nat44":
         run_vppctl_command(
@@ -450,7 +421,7 @@ def configure_nat_runtime_mode(nat_mode: str, bvi_interface: str) -> None:
             f"NAT44 включен (sessions={NAT44_MAX_SESSIONS})",
         )
         run_vppctl_command(
-            f"set interface nat44 in {bvi_interface} out {outside_iface}",
+            f"set interface nat44 in {inside_iface} out {outside_iface}",
             "Назначены NAT44 роли inside/outside",
         )
         run_vppctl_command(
@@ -465,11 +436,7 @@ def configure_nat_runtime_mode(nat_mode: str, bvi_interface: str) -> None:
         f"NAT_FO public-addr={NAT_FO_PUBLIC_ADDR}",
     )
     run_vppctl_command(
-        f"nat_fo set port-range {NAT_FO_PORT_RANGE_START} {NAT_FO_PORT_RANGE_END}",
-        "NAT_FO port-range установлен",
-    )
-    run_vppctl_command(
-        f"nat_fo interface inside {bvi_interface}",
+        f"nat_fo interface inside {inside_iface}",
         "NAT_FO inside интерфейс назначен",
     )
     run_vppctl_command(
@@ -480,7 +447,7 @@ def configure_nat_runtime_mode(nat_mode: str, bvi_interface: str) -> None:
 
 
 def setup_network(project_root: Path, nat_mode: str, n_workers: int = 0) -> None:
-    """Поднимает VPP runtime-топологию memif+BVI и применяет NAT-режим."""
+    """Поднимает VPP runtime-топологию inside/outside memif и применяет NAT-режим."""
     del project_root  # API-совместимость с другими workflow-функциями.
     mode = ensure_valid_nat_mode(nat_mode)
     click.echo(f"=== Подготовка сети (nat-mode={mode}, n_workers={n_workers}) ===")
@@ -491,15 +458,14 @@ def setup_network(project_root: Path, nat_mode: str, n_workers: int = 0) -> None
     restart_vpp_service()
     remove_stale_memif_sockets()
 
-    for endpoint in (MEMIF_INSIDE_A, MEMIF_INSIDE_B, MEMIF_OUTSIDE):
+    for endpoint in (MEMIF_INSIDE_A, MEMIF_OUTSIDE):
         create_memif_endpoint(
             endpoint,
             queue_count=memif_queue_count_for_endpoint(endpoint, n_workers),
         )
 
-    bvi_interface = create_bvi_interface()
-    configure_l2_and_l3(bvi_interface)
-    set_interfaces_up(bvi_interface)
-    configure_nat_runtime_mode(mode, bvi_interface)
+    configure_l3_interfaces()
+    set_interfaces_up()
+    configure_nat_runtime_mode(mode)
 
     click.echo("✓ Сетевая топология готова")

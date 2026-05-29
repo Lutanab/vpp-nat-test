@@ -14,8 +14,6 @@ from manage_nat.helpers import run_command, with_privileges
 from manage_nat.network.setup import (
     FAILOVER_STARTUP_CONFIG_RE,
     NAT44_MAX_SESSIONS,
-    NAT_FO_PORT_RANGE_END,
-    NAT_FO_PORT_RANGE_START,
     NAT_FO_PUBLIC_ADDR,
     VPP_SERVICE_NAME,
     configure_vpp_nat_plugins_for_mode,
@@ -35,8 +33,7 @@ DEFAULT_FAILOVER_TIME_CONFIG_PATH = PROJECT_ROOT / "configs" / "failover" / "con
 FAILOVER_TOPOLOGY_TEMPLATE_PATH = PROJECT_ROOT / "configs" / "failover" / "nat_fo_topology.vpp.template"
 FAILOVER_TREX_CONFIG_PATH = PROJECT_ROOT / "configs" / "trex" / "failover" / "trex_cfg.yaml"
 FAILOVER_PROFILE_RESULTS_ROOT = PROJECT_ROOT / "results" / "failover_profile"
-FAILOVER_PROFILE_RESULT_FILE_NAME = "result.tsv"
-FAILOVER_PROFILE_PLOT_FILE_NAME = "result.png"
+FAILOVER_PROFILE_SUMMARY_FILE_NAME = "summary.json"
 VPP_FAILOVER_TOPOLOGY_PATH = Path("/etc/vpp/nat_fo_topology.vpp")
 SUPPORTED_FAILOVER_WORKERS = 1
 MEMIF_SOCKET_READY_TIMEOUT_SEC = 10
@@ -79,13 +76,6 @@ class UdpMappingRange:
     ip: str
     port_start: int
     count: int
-
-
-@dataclass(frozen=True, slots=True)
-class ProfileSample:
-    elapsed_sec: float
-    tx_pkts: int
-    rx_pkts: int
 
 
 def load_failover_config(path: Path) -> FailoverConfig:
@@ -171,19 +161,27 @@ def require(data: dict[str, object], key: str) -> object:
 
 def prepare_failover_runtime(config: FailoverConfig) -> None:
     """Подготавливает VPP+TRex failover стенд в тихом режиме."""
+    click.echo("setup: preparing failover runtime")
+    click.echo("setup: applying VPP mode, workers and topology")
     with quiet_stdout():
         configure_vpp_nat_plugins_for_mode(config.nat_mode)
         configure_vpp_workers(config.n_workers)
         write_failover_topology(config.nat_mode)
         ensure_failover_exec_in_startup_conf()
+    click.echo("setup: (re)starting TRex failover server")
+    with quiet_stdout():
         stop_existing_trex_server(config_paths=(FAILOVER_TREX_CONFIG_PATH,))
         stop_vpp_service()
         remove_stale_memif_sockets()
         trex_process = launch_trex_failover_server(FAILOVER_TREX_CONFIG_PATH)
+    click.echo("setup: waiting for TRex memif sockets")
+    with quiet_stdout():
         wait_for_failover_memif_sockets()
+    click.echo("setup: restarting VPP and verifying TRex control")
+    with quiet_stdout():
         restart_vpp_service()
         wait_for_launched_trex_server(trex_process)
-    click.echo("setup: ready")
+    click.echo("setup: failover runtime ready")
 
 
 def quiet_stdout():
@@ -225,7 +223,6 @@ def nat_runtime_lines(nat_mode: str) -> list[str]:
     if nat_mode == "nat_fo":
         return [
             f"nat_fo set public-addr {NAT_FO_PUBLIC_ADDR}",
-            f"nat_fo set port-range {NAT_FO_PORT_RANGE_START} {NAT_FO_PORT_RANGE_END}",
             "nat_fo interface inside loop0",
             "nat_fo interface outside memif20/0",
         ]

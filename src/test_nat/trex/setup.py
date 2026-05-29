@@ -17,12 +17,13 @@ from manage_nat.nat_mode import parse_configured_workers
 from manage_nat.network.setup import (
     MEMIF_INSIDE_A,
     MEMIF_OUTSIDE,
-    NAT_INSIDE_BVI_IP_CIDR,
+    NAT_INSIDE_IP_CIDR,
     NAT_OUTSIDE_IP_CIDR,
     configure_memif_rx_placement,
 )
 
 TREX_CFG_PATH = PROJECT_ROOT / "configs" / "trex" / "trex_cfg.yaml"
+TREX_FAILOVER_CFG_PATH = PROJECT_ROOT / "configs" / "trex" / "failover" / "trex_cfg.yaml"
 TREX_PID_PATH = PROJECT_ROOT / "configs" / "trex" / "trex.pid"
 TREX_LOG_PATH = PROJECT_ROOT / "configs" / "trex" / "trex.log"
 TREX_RPC_HOST = "127.0.0.1"
@@ -63,7 +64,7 @@ TREX_PORTS = (
         vdev_name="net_memif0",
         socket_path=MEMIF_INSIDE_A.socket_path,
         ip=TREX_INSIDE_A_IP,
-        default_gw=cidr_ip(NAT_INSIDE_BVI_IP_CIDR),
+        default_gw=cidr_ip(NAT_INSIDE_IP_CIDR),
     ),
     TrexPort(
         name="outside",
@@ -108,7 +109,7 @@ def ensure_memif_sockets_exist() -> None:
 
 
 def render_trex_config() -> str:
-    """Генерирует TRex server config для трех memif-портов стенда."""
+    """Генерирует TRex server config для inside/outside memif-портов стенда."""
     interface_lines = "\n".join(
         f'    - "--vdev={port.vdev_name},role=slave,id=0,socket-abstract=no,socket={port.socket_path}"'
         for port in TREX_PORTS
@@ -304,7 +305,7 @@ def setup_trex_server(config_path: Path = TREX_CFG_PATH) -> None:
     trex_binary = resolve_trex_server_binary()
     ensure_memif_sockets_exist()
     write_trex_config(config_path)
-    stop_existing_trex_server()
+    stop_existing_trex_server(config_paths=(TREX_CFG_PATH, TREX_FAILOVER_CFG_PATH))
     trex_pid = start_trex_server(trex_binary=trex_binary, config_path=config_path)
     configure_vpp_memif_rx_placement()
 

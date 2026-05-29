@@ -8,30 +8,31 @@ from typing import Any
 import rich_click as click
 
 from manage_nat.helpers import with_privileges
-from manage_nat.network.setup import VPP_SERVICE_NAME, wait_for_vpp_ready
+from manage_nat.network.setup import VPP_SERVICE_NAME
 
+from ..results import write_json
 from ..trex.run.udp import (
     CLIENT_PORT,
     SERVER_PORT,
     TREX_SERVER_HOST,
-    build_udp_streams,
+    build_udp_burst_streams,
     configure_l3_mode,
     load_trex_stl_api,
-    read_udp_counters,
 )
 from .base import (
-    FAILOVER_PROFILE_PLOT_FILE_NAME,
-    FAILOVER_PROFILE_RESULT_FILE_NAME,
+    FAILOVER_PROFILE_SUMMARY_FILE_NAME,
     FailoverConfig,
     FailoverTimeConfig,
-    ProfileSample,
     build_failover_profile_results_dir,
-    quiet_stdout,
 )
+
+RECOVERY_BURST_DURATION_SEC = 0.05
+RECOVERY_BURST_MAX_FLOWS = 128
+VPPCTL_POLL_TIMEOUT_SEC = 1.0
 
 
 def run_failover_udp_profile(config: FailoverConfig, time_config: FailoverTimeConfig) -> None:
-    """Профилирует rx-динамику UDP трафика во время асинхронного рестарта VPP."""
+    """Меряет время восстановления dataplane после `systemctl restart vpp`."""
     api = load_trex_stl_api()
     client = api.STLClient(server=TREX_SERVER_HOST)
     ports = [CLIENT_PORT, SERVER_PORT]
@@ -42,93 +43,93 @@ def run_failover_udp_profile(config: FailoverConfig, time_config: FailoverTimeCo
         client.connect()
         client.reset(ports=ports)
         configure_l3_mode(client)
-        streams, pg_ids = build_udp_streams(
+
+        click.echo("profile: warmup burst")
+        warmup_streams, _ = build_udp_burst_streams(
             api=api,
-            target_pps=config.target_pps,
-            packet_size=config.packet_size,
             flow_count=config.flow_count,
+            packet_size=config.packet_size,
             trex_data_cores=1,
+            duration_sec=max(RECOVERY_BURST_DURATION_SEC, time_config.warmup_sec),
         )
-        client.remove_all_streams(ports=[CLIENT_PORT])
-        client.add_streams(streams, ports=[CLIENT_PORT])
+        send_udp_burst(client, streams=warmup_streams)
+        pre_restart_server_rx_pkts = read_server_rx_counter(client)
+        restart_start_mono = time.monotonic()
 
-        click.echo("warmup: continuous inside->outside traffic")
-        client.clear_stats(ports=ports)
-        client.start(ports=[CLIENT_PORT], force=True)
-        if time_config.warmup_sec > 0:
-            time.sleep(time_config.warmup_sec)
-        client.clear_stats(ports=ports)
-
-        click.echo("measure: polling counters + async restart")
-        measurement_start = time.monotonic()
         restart_process = subprocess.Popen(
             with_privileges(["systemctl", "restart", VPP_SERVICE_NAME]),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        samples: list[ProfileSample] = []
-        last_tx_pkts = 0
-        last_rx_pkts = 0
-        poll_errors = 0
+        click.echo("profile: restart started, probing recovery")
+
+        recovery_flow_count = min(config.flow_count, RECOVERY_BURST_MAX_FLOWS)
+        recovery_streams, _ = build_udp_burst_streams(
+            api=api,
+            flow_count=recovery_flow_count,
+            packet_size=config.packet_size,
+            trex_data_cores=1,
+            duration_sec=RECOVERY_BURST_DURATION_SEC,
+        )
+
+        t1_vppctl_ready_sec: float | None = None
+        t2_counter_growth_sec: float | None = None
+        counter_before = pre_restart_server_rx_pkts
+        next_heartbeat_sec = 1.0
+
         while True:
             now = time.monotonic()
-            elapsed = now - measurement_start
-            if elapsed > time_config.waiting_sec:
+            elapsed_sec = now - restart_start_mono
+            if elapsed_sec > time_config.waiting_sec:
                 break
-            tx_pkts, rx_pkts, ok = try_read_udp_counters(
-                client,
-                pg_ids=pg_ids,
-                fallback=(last_tx_pkts, last_rx_pkts),
-            )
-            if not ok:
-                poll_errors += 1
-            last_tx_pkts, last_rx_pkts = tx_pkts, rx_pkts
-            samples.append(ProfileSample(elapsed_sec=elapsed, tx_pkts=tx_pkts, rx_pkts=rx_pkts))
+
+            vppctl_ready = vppctl_is_ready()
+            if vppctl_ready:
+                if t1_vppctl_ready_sec is None:
+                    t1_vppctl_ready_sec = elapsed_sec
+
+            memif_connected = vpp_memif_connected()
+
+            if vppctl_ready and memif_connected:
+                recovery_ok = run_trex_recovery(client, recovery_streams)
+                if recovery_ok:
+                    counter_after = read_server_rx_counter(client)
+                    if counter_after > counter_before:
+                        if t2_counter_growth_sec is None:
+                            t2_counter_growth_sec = elapsed_sec
+                    counter_before = counter_after
+
+            if elapsed_sec >= next_heartbeat_sec:
+                click.echo(
+                    "profile: "
+                    f"t={elapsed_sec:.1f}s, "
+                    f"vppctl={'up' if vppctl_ready else 'down'}, "
+                    f"memif={'up' if memif_connected else 'down'}"
+                )
+                next_heartbeat_sec += 1.0
+
+            if t2_counter_growth_sec is not None:
+                break
+
             next_tick = now + poll_period_sec
             sleep_for = next_tick - time.monotonic()
             if sleep_for > 0:
                 time.sleep(sleep_for)
 
-        if samples:
-            tx_pkts, rx_pkts, _ = try_read_udp_counters(
-                client,
-                pg_ids=pg_ids,
-                fallback=(last_tx_pkts, last_rx_pkts),
-            )
-            samples.append(
-                ProfileSample(
-                    elapsed_sec=min(time_config.waiting_sec, time.monotonic() - measurement_start),
-                    tx_pkts=tx_pkts,
-                    rx_pkts=rx_pkts,
-                )
-            )
-
         if restart_process.wait(timeout=60) != 0:
-            raise RuntimeError("VPP restart process failed during profile measurement")
-        with quiet_stdout():
-            wait_for_vpp_ready(timeout_seconds=25)
+            raise RuntimeError("VPP restart process failed during profile run")
 
-        points = build_profile_points(samples)
-        result_path = write_profile_tsv(points, config)
-        plot_path = write_profile_plot(points, config)
-        if not points:
-            raise RuntimeError("No profile samples were collected")
-
-        peak_rx_pps = max(point["rx_pps"] for point in points)
-        min_rx_pps = min(point["rx_pps"] for point in points)
-        final_rx_pps = points[-1]["rx_pps"]
-        click.echo(
-            "result: "
-            f"samples={len(points)}, min_rx_pps={min_rx_pps:.2f}, "
-            f"peak_rx_pps={peak_rx_pps:.2f}, final_rx_pps={final_rx_pps:.2f}, poll_errors={poll_errors}"
+        summary_path = write_profile_summary(
+            t1_vppctl_ready_sec=t1_vppctl_ready_sec,
+            t2_counter_growth_sec=t2_counter_growth_sec,
+            config=config,
         )
-        click.echo(f"series: {result_path}")
-        click.echo(f"plot: {plot_path}")
+        click.echo(f"summary: {summary_path}")
     finally:
         if restart_process is not None and restart_process.poll() is None:
             restart_process.terminate()
         try:
-            client.stop(ports=[CLIENT_PORT])
+            client.stop(ports=ports)
         except Exception:
             pass
         try:
@@ -137,87 +138,93 @@ def run_failover_udp_profile(config: FailoverConfig, time_config: FailoverTimeCo
             pass
 
 
-def build_profile_points(samples: list[ProfileSample]) -> list[dict[str, float]]:
-    """Строит временные точки с оценкой tx/rx pps по дельте соседних сэмплов."""
-    points: list[dict[str, float]] = []
-    previous: ProfileSample | None = None
-    for sample in samples:
-        if previous is None:
-            previous = sample
-            continue
-        dt = sample.elapsed_sec - previous.elapsed_sec
-        if dt <= 0:
-            previous = sample
-            continue
-        tx_pps = max(0.0, (sample.tx_pkts - previous.tx_pkts) / dt)
-        rx_pps = max(0.0, (sample.rx_pkts - previous.rx_pkts) / dt)
-        points.append(
-            {
-                "interval_start_sec": previous.elapsed_sec,
-                "interval_end_sec": sample.elapsed_sec,
-                "dt_sec": dt,
-                "tx_pkts": float(sample.tx_pkts),
-                "rx_pkts": float(sample.rx_pkts),
-                "tx_pps": tx_pps,
-                "rx_pps": rx_pps,
-            }
-        )
-        previous = sample
-    return points
+def send_udp_burst(client: Any, streams: list[Any]) -> None:
+    """Отправляет burst с client-порта и дожидается завершения."""
+    client.remove_all_streams(ports=[CLIENT_PORT])
+    client.add_streams(streams, ports=[CLIENT_PORT])
+    client.start(ports=[CLIENT_PORT], force=True)
+    client.wait_on_traffic(ports=[CLIENT_PORT])
 
 
-def try_read_udp_counters(
-    client: Any,
-    pg_ids: tuple[int, ...],
-    fallback: tuple[int, int],
-) -> tuple[int, int, bool]:
-    """Читает UDP счетчики; при временном сбое возвращает fallback-значения."""
+def run_trex_recovery(client: Any, streams: list[Any]) -> bool:
+    """Переинициализирует TRex dataplane и отправляет recovery burst."""
     try:
-        tx_pkts, rx_pkts = read_udp_counters(client, pg_ids=pg_ids)
-        return tx_pkts, rx_pkts, True
+        configure_l3_mode(client)
+        send_udp_burst(client, streams=streams)
+        return True
     except Exception:
-        return fallback[0], fallback[1], False
+        return False
 
 
-def write_profile_tsv(points: list[dict[str, float]], config: FailoverConfig) -> Path:
-    """Сохраняет временной ряд профиля в TSV-файл и возвращает путь."""
-    output_dir = build_failover_profile_results_dir(config)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / FAILOVER_PROFILE_RESULT_FILE_NAME
-    lines = ["interval_start_sec\tinterval_end_sec\tdt_sec\ttx_pkts\trx_pkts\ttx_pps\trx_pps"]
-    for point in points:
-        lines.append(
-            f"{point['interval_start_sec']:.6f}\t{point['interval_end_sec']:.6f}\t"
-            f"{point['dt_sec']:.6f}\t{int(point['tx_pkts'])}\t{int(point['rx_pkts'])}\t"
-            f"{point['tx_pps']:.6f}\t{point['rx_pps']:.6f}"
+def read_server_rx_counter(client: Any) -> int:
+    """Возвращает RX-счетчик server-side TRex интерфейса."""
+    stats = client.get_stats(ports=[SERVER_PORT])
+    server_stats = stats.get(SERVER_PORT) or stats.get(str(SERVER_PORT))
+    if server_stats is None:
+        raise RuntimeError("TRex did not return server port stats")
+    if "rx_pkts" in server_stats:
+        return int(server_stats["rx_pkts"])
+    if "ipackets" in server_stats:
+        return int(server_stats["ipackets"])
+    if "opackets" in server_stats:
+        return int(server_stats["opackets"])
+    return 0
+
+
+def vppctl_is_ready() -> bool:
+    """Проверяет доступность `vppctl`."""
+    try:
+        result = subprocess.run(
+            with_privileges(["vppctl", "show", "version"]),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=VPPCTL_POLL_TIMEOUT_SEC,
         )
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return output_path
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0
 
 
-def write_profile_plot(points: list[dict[str, float]], config: FailoverConfig) -> Path:
-    """Сохраняет график зависимости rx pps от времени."""
-    import matplotlib
+def vpp_memif_connected() -> bool:
+    """Проверяет, что memif10/0 и memif20/0 находятся в состоянии up."""
+    try:
+        result = subprocess.run(
+            with_privileges(["vppctl", "show", "interface"]),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=VPPCTL_POLL_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    if result.returncode != 0:
+        return False
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    lines = result.stdout.lower().splitlines()
+    memif10_up = any("memif10/0" in line and "up" in line for line in lines)
+    memif20_up = any("memif20/0" in line and "up" in line for line in lines)
+    return memif10_up and memif20_up
 
+
+def write_profile_summary(
+    t1_vppctl_ready_sec: float | None,
+    t2_counter_growth_sec: float | None,
+    config: FailoverConfig,
+) -> Path:
+    """Пишет краткий `summary.json` для failover profile."""
     output_dir = build_failover_profile_results_dir(config)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / FAILOVER_PROFILE_PLOT_FILE_NAME
-
-    times = [point["interval_end_sec"] for point in points]
-    rx_pps = [point["rx_pps"] for point in points]
-
-    fig, ax = plt.subplots(figsize=(12, 6), dpi=140)
-    ax.plot(times, rx_pps, color="#2563eb", linewidth=1.4, label="rx_pps")
-    ax.axhline(config.target_pps, color="red", alpha=0.35, linewidth=1.6, label="target_pps")
-    ax.set_title("Failover profile")
-    ax.set_xlabel("time, sec")
-    ax.set_ylabel("pps")
-    ax.grid(True, alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
+    output_path = output_dir / FAILOVER_PROFILE_SUMMARY_FILE_NAME
+    control_plane_recovery_time = t1_vppctl_ready_sec
+    data_plane_recovery_time = (
+        None
+        if t1_vppctl_ready_sec is None or t2_counter_growth_sec is None
+        else t2_counter_growth_sec - t1_vppctl_ready_sec
+    )
+    summary = {
+        "control_plane_recovery_time": control_plane_recovery_time,
+        "data_plane_recovery_time": data_plane_recovery_time,
+    }
+    write_json(output_path, summary)
     return output_path

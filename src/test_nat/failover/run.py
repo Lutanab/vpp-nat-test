@@ -27,14 +27,8 @@ def run_failover_simple() -> None:
 
 
 def run_failover_profile() -> None:
-    """Запускает failover profile: непрерывная UDP нагрузка + polling во время рестарта."""
+    """Запускает failover profile: recovery polling и измерение t1/t2."""
     config = load_failover_config(DEFAULT_FAILOVER_CONFIG_PATH)
     time_config = load_failover_time_config(DEFAULT_FAILOVER_TIME_CONFIG_PATH)
-    click.echo(
-        "failover profile: "
-        f"mode={config.nat_mode}, flows={config.flow_count}, pps={config.target_pps}, "
-        f"warmup={time_config.warmup_sec:g}s, measure={time_config.waiting_sec:g}s, "
-        f"poll={time_config.poll_interval_ms}ms"
-    )
     prepare_failover_runtime(config)
     run_failover_udp_profile(config, time_config)

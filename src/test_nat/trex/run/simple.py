@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from ipaddress import ip_address, ip_interface
 from typing import Any
 
-from manage_nat.network.setup import NAT_INSIDE_BVI_IP_CIDR, NAT_OUTSIDE_IP_CIDR
+from manage_nat.network.setup import NAT_INSIDE_IP_CIDR, NAT_OUTSIDE_IP_CIDR
 
 from ..setup import TREX_INSIDE_A_IP, TREX_OUTSIDE_IP
 from .udp import CLIENT_PORT, SERVER_PORT, TREX_SERVER_HOST, configure_l3_mode, load_trex_stl_api
@@ -53,6 +53,7 @@ class SimpleTcpTestResult:
     expected_nat_source_ip: str
     inside_network: str
     outside_network: str
+    inside_packet: CapturedTcpPacket | None
     outside_packet: CapturedTcpPacket | None
     captured_packets: tuple[CapturedTcpPacket, ...]
 
@@ -112,9 +113,17 @@ def find_outside_packet(packets: tuple[CapturedTcpPacket, ...]) -> CapturedTcpPa
     return None
 
 
+def find_inside_packet(packets: tuple[CapturedTcpPacket, ...]) -> CapturedTcpPacket | None:
+    """Находит исходный TCP/IP пакет, отправленный с inside-порта TRex."""
+    for packet in packets:
+        if packet.port == CLIENT_PORT and packet.ip_src and packet.ip_dst:
+            return packet
+    return None
+
+
 def build_verdict(outside_packet: CapturedTcpPacket | None) -> tuple[bool | None, str]:
     """Выносит verdict только по source IP пакета на outside-порту."""
-    inside_network = ip_interface(NAT_INSIDE_BVI_IP_CIDR).network
+    inside_network = ip_interface(NAT_INSIDE_IP_CIDR).network
     outside_network = ip_interface(NAT_OUTSIDE_IP_CIDR).network
     expected_nat_source_ip = ip_interface(NAT_OUTSIDE_IP_CIDR).ip
 
@@ -167,9 +176,10 @@ def run_simple_tcp_test() -> SimpleTcpTestResult:
         capture_id = None
 
         packets = tuple(parse_captured_packet(api, raw_packet) for raw_packet in raw_packets)
+        inside_packet = find_inside_packet(packets)
         outside_packet = find_outside_packet(packets)
         nat_applied, verdict = build_verdict(outside_packet)
-        inside_network = ip_interface(NAT_INSIDE_BVI_IP_CIDR).network
+        inside_network = ip_interface(NAT_INSIDE_IP_CIDR).network
         outside_network = ip_interface(NAT_OUTSIDE_IP_CIDR).network
         expected_nat_source_ip = ip_interface(NAT_OUTSIDE_IP_CIDR).ip
 
@@ -179,6 +189,7 @@ def run_simple_tcp_test() -> SimpleTcpTestResult:
             expected_nat_source_ip=str(expected_nat_source_ip),
             inside_network=str(inside_network),
             outside_network=str(outside_network),
+            inside_packet=inside_packet,
             outside_packet=outside_packet,
             captured_packets=packets,
         )

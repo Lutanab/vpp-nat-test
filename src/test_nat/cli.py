@@ -86,6 +86,7 @@ def run_group() -> None:
 @run_group.command("simple")
 def run_simple_command() -> None:
     """Run a minimal TCP NAT correctness check."""
+    setup_trex_server()
     print_simple_tcp_result(run_simple_tcp_test())
 
 
@@ -138,12 +139,35 @@ def run_failover_profile_command() -> None:
 def print_simple_tcp_result(result: SimpleTcpTestResult) -> None:
     """Печатает результат минимальной TCP-проверки NAT."""
     click.echo(f"NAT: {format_nat_status(result.nat_applied)}")
-    click.echo(result.verdict)
 
-    if not result.captured_packets:
-        click.echo("Packets: <empty>")
+    if result.inside_packet is None:
+        click.echo("before: <not captured>")
+    else:
+        click.echo(
+            "before: "
+            f"{format_endpoint(result.inside_packet.ip_src, result.inside_packet.tcp_src_port)} "
+            f"-> {format_endpoint(result.inside_packet.ip_dst, result.inside_packet.tcp_dst_port)}"
+        )
+
+    if result.outside_packet is None:
+        click.echo("after:  <not captured>")
+        click.echo(result.verdict)
+    else:
+        click.echo(
+            "after:  "
+            f"{format_endpoint(result.outside_packet.ip_src, result.outside_packet.tcp_src_port)} "
+            f"-> {format_endpoint(result.outside_packet.ip_dst, result.outside_packet.tcp_dst_port)}"
+        )
+
+    extra_packets = [
+        packet
+        for packet in result.captured_packets
+        if packet not in (result.inside_packet, result.outside_packet)
+    ]
+    if not extra_packets:
         return
-    for packet in result.captured_packets:
+    click.echo("Other captured packets:")
+    for packet in extra_packets:
         print_captured_tcp_packet(packet)
 
 
@@ -160,7 +184,7 @@ def print_captured_tcp_packet(packet: CapturedTcpPacket) -> None:
     """Печатает только адреса и порты TCP-пакета."""
     src = format_endpoint(packet.ip_src, packet.tcp_src_port)
     dst = format_endpoint(packet.ip_dst, packet.tcp_dst_port)
-    click.echo(f"Packet: {src} -> {dst}")
+    click.echo(f"  port {packet.port}: {src} -> {dst}")
 
 
 def format_endpoint(ip: str | None, port: int | None) -> str:

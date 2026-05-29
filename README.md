@@ -39,9 +39,11 @@ manage-nat prepare
 Очередной раз собрать:
 ```bash
 cd vpp
+rm -f build-root/*.deb
 sudo make pkg-deb-debug
 sudo dpkg -i build-root/*.deb
-cd ../
+sudo systemctl restart vpp
+cd ..
 ```
 
 Если перетер конфиги (напр startup.conf):
@@ -67,7 +69,7 @@ manage-nat network setup <none|nat44|nat_fo> [--n_workers N]
 - обновляет в `/etc/vpp/startup.conf` управляемый блок плагинов (`nat_plugin.so` / `nat_fo_plugin.so`);
 - обновляет `cpu`-параметры VPP в `/etc/vpp/startup.conf` (`main-core` и `corelist-workers` через `--n_workers`);
 - перезапускает VPP;
-- поднимает VPP-сетевую топологию (memif + bridge/BVI), создавая по `N` RX/TX-очередей на hot-path memif-интерфейсах при `--n_workers N`;
+- поднимает VPP-сетевую топологию (inside/outside memif), создавая по `N` RX/TX-очередей на hot-path memif-интерфейсах при `--n_workers N`;
 - применяет runtime-конфигурацию выбранного NAT-режима.
 
 После подключения TRex к memif-сокетам load-test дополнительно назначает RX-очереди hot-path memif-интерфейсов воркерам 1:1: queue `i` -> worker `i`.
@@ -80,9 +82,17 @@ manage-nat network setup nat_fo
 
 Автоматически применяются команды:
 - `nat_fo set public-addr 10.8.0.1`
-- `nat_fo set port-range 20000 40000`
-- `nat_fo interface inside <BVI>`
+- `nat_fo interface inside <inside-memif>`
 - `nat_fo interface outside <outside-memif>`
+
+`nat_fo` работает в identity-port режиме: source IP переписывается в public/external IP,
+а source port остается тем же. Для явного 1:1 соответствия можно добавлять mappings:
+
+```bash
+sudo vppctl nat_fo map internal 10.8.1.2 public 10.8.0.1
+```
+
+Если mapping для internal IP не найден, используется fallback `nat_fo set public-addr`.
 
 Проверка:
 
@@ -93,8 +103,14 @@ sudo vppctl show nat_fo
 #### CLI `nat_fo` (быстрый справочник)
 
 ```bash
-# Общий статус плагина (public addr, портовый диапазон, live/total сессии)
+# Общий статус плагина (public addr, identity-port mode, mappings, live/total сессии)
 sudo vppctl show nat_fo
+
+# Добавить/обновить 1:1 mapping internal -> public/external IP
+sudo vppctl nat_fo map internal 10.8.1.2 public 10.8.0.1
+
+# Удалить mapping для internal IP
+sudo vppctl nat_fo map internal 10.8.1.2 disable
 
 # Очистить все текущие NAT-сессии
 sudo vppctl nat_fo clear sessions
@@ -137,7 +153,7 @@ manage-nat network setup nat44
 
 Автоматически применяются команды:
 - `nat44 plugin enable sessions 10000`
-- `set interface nat44 in <BVI> out <outside-memif>`
+- `set interface nat44 in <inside-memif> out <outside-memif>`
 - `nat44 add interface address <outside-memif>`
 
 Проверка:
