@@ -18,5 +18,5 @@ TREX_CONSOLE_LINK_PATH = Path("/usr/local/bin") / TREX_CONSOLE_BINARY_NAME
 # - VPP worker cores are allocated from VPP_CPU_MAIN_CORE + 1 upward.
 # - VPP_CPU_MAX_WORKERS limits how many consecutive worker cores may be used.
 # ============================================================================
-VPP_CPU_MAIN_CORE = 7
-VPP_CPU_MAX_WORKERS = 7
+VPP_CPU_MAIN_CORE = 320
+VPP_CPU_MAX_WORKERS = 20

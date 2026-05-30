@@ -36,6 +36,7 @@ VPP_READY_TIMEOUT_SECONDS = 25
 VPP_READY_POLL_INTERVAL_SECONDS = 1
 INSIDE_MEMIF_SOCKET_ID_BASE = 10
 OUTSIDE_MEMIF_SOCKET_ID_BASE = 20
+FIXED_MEMIF_PAIR_COUNT = 8
 PAIR_HOST_STRIDE = 4
 PAIR_SUBNET_PREFIX_LEN = 30
 
@@ -73,6 +74,11 @@ STALE_MEMIF_SOCKET_PATHS = ("/run/vpp/memif-inside-b.sock",)
 def memif_pair_count_for_workers(n_workers: int) -> int:
     """Возвращает число inside/outside memif-пар для текущей конфигурации workers."""
     return max(1, n_workers)
+
+
+def memif_topology_pair_count() -> int:
+    """Возвращает фиксированное число memif-пар в runtime-топологии."""
+    return FIXED_MEMIF_PAIR_COUNT
 
 
 def pair_host_base(pair_index: int) -> int:
@@ -135,6 +141,17 @@ def memif_pairs_for_workers(n_workers: int) -> tuple[tuple[MemifEndpoint, MemifE
             memif_outside_endpoint_for_pair(pair_index),
         )
         for pair_index in range(pair_count)
+    )
+
+
+def memif_topology_pairs() -> tuple[tuple[MemifEndpoint, MemifEndpoint], ...]:
+    """Строит полный фиксированный список inside/outside memif-пар runtime-топологии."""
+    return tuple(
+        (
+            memif_inside_endpoint_for_pair(pair_index),
+            memif_outside_endpoint_for_pair(pair_index),
+        )
+        for pair_index in range(memif_topology_pair_count())
     )
 
 
@@ -449,18 +466,16 @@ def configure_memif_rx_placement(n_workers: int) -> None:
 
 def remove_stale_memif_sockets() -> None:
     """Удаляет старые memif-сокеты перед пересозданием интерфейсов."""
-    for pair_index in range(memif_pair_count_for_workers(VPP_CPU_MAX_WORKERS)):
-        inside_endpoint = memif_inside_endpoint_for_pair(pair_index)
-        outside_endpoint = memif_outside_endpoint_for_pair(pair_index)
+    for inside_endpoint, outside_endpoint in memif_topology_pairs():
         for endpoint in (inside_endpoint, outside_endpoint):
             run_command(with_privileges(["rm", "-f", endpoint.socket_path]))
     for socket_path in STALE_MEMIF_SOCKET_PATHS:
         run_command(with_privileges(["rm", "-f", socket_path]))
 
 
-def configure_l3_interfaces(n_workers: int) -> None:
+def configure_l3_interfaces() -> None:
     """Назначает IP-адреса напрямую inside/outside memif-интерфейсам."""
-    for pair_index, (inside_endpoint, outside_endpoint) in enumerate(memif_pairs_for_workers(n_workers)):
+    for pair_index, (inside_endpoint, outside_endpoint) in enumerate(memif_topology_pairs()):
         inside_ip_cidr = inside_ip_cidr_for_pair(pair_index)
         outside_ip_cidr = outside_ip_cidr_for_pair(pair_index)
         run_vppctl_command(
@@ -473,10 +488,10 @@ def configure_l3_interfaces(n_workers: int) -> None:
         )
 
 
-def set_interfaces_up(n_workers: int) -> None:
+def set_interfaces_up() -> None:
     """Поднимает все интерфейсы стенда."""
     interfaces: list[str] = []
-    for inside_endpoint, outside_endpoint in memif_pairs_for_workers(n_workers):
+    for inside_endpoint, outside_endpoint in memif_topology_pairs():
         interfaces.extend((inside_endpoint.interface_name, outside_endpoint.interface_name))
     for iface in interfaces:
         run_vppctl_command(f"set interface state {iface} up", f"Поднят интерфейс {iface}")
@@ -546,15 +561,15 @@ def setup_network(project_root: Path, nat_mode: str, n_workers: int = 0) -> None
     restart_vpp_service()
     remove_stale_memif_sockets()
 
-    for inside_endpoint, outside_endpoint in memif_pairs_for_workers(n_workers):
+    for inside_endpoint, outside_endpoint in memif_topology_pairs():
         for endpoint in (inside_endpoint, outside_endpoint):
             create_memif_endpoint(
                 endpoint,
                 queue_count=memif_queue_count_for_endpoint(endpoint, n_workers),
             )
 
-    configure_l3_interfaces(n_workers)
-    set_interfaces_up(n_workers)
+    configure_l3_interfaces()
+    set_interfaces_up()
     configure_nat_runtime_mode(mode, n_workers)
 
     click.echo("✓ Сетевая топология готова")

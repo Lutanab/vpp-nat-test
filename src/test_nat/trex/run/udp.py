@@ -17,7 +17,7 @@ from ..setup import (
     TREX_INSIDE_A_IP,
     TREX_OUTSIDE_IP,
     TrexPortPair,
-    build_trex_port_pairs,
+    build_active_trex_port_pairs,
     resolve_trex_data_cores as resolve_trex_setup_data_cores,
 )
 
@@ -100,7 +100,7 @@ def resolve_trex_data_cores() -> int:
 
 def resolve_active_port_pairs() -> tuple[TrexPortPair, ...]:
     """Возвращает активные inside/outside пары TRex-портов для текущей worker-конфигурации."""
-    return build_trex_port_pairs(parse_configured_workers() or 0)
+    return build_active_trex_port_pairs(parse_configured_workers() or 0)
 
 
 def split_evenly(total: int, parts: int) -> list[int]:

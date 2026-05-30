@@ -69,8 +69,8 @@ manage-nat network setup <none|nat44|nat_fo> [--n_workers N]
 - обновляет в `/etc/vpp/startup.conf` управляемый блок плагинов (`nat_plugin.so` / `nat_fo_plugin.so`);
 - обновляет `cpu`-параметры VPP в `/etc/vpp/startup.conf` (`main-core` и `corelist-workers` через `--n_workers`);
 - перезапускает VPP;
-- поднимает VPP-сетевую топологию из memif-пар: при `--n_workers N` создается `N` inside + `N` outside интерфейсов
-  (для `n_workers=0` остается одна пара `memif10/0` + `memif20/0`);
+- поднимает фиксированную VPP-сетевую топологию из 8 memif-пар (`8` inside + `8` outside интерфейсов);
+- в dataplane/NAT используются только первые `N` пар (по `--n_workers N`; для `n_workers=0` используется первая пара);
 - применяет runtime-конфигурацию выбранного NAT-режима.
 
 После подключения TRex к memif-сокетам load-test дополнительно назначает пары интерфейсов воркерам 1:1:

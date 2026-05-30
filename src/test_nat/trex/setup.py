@@ -19,7 +19,8 @@ from manage_nat.network.setup import (
     inside_host_ip_for_pair,
     inside_ip_cidr_for_pair,
     memif_pair_count_for_workers,
-    memif_pairs_for_workers,
+    memif_topology_pair_count,
+    memif_topology_pairs,
     outside_host_ip_for_pair,
     outside_ip_cidr_for_pair,
 )
@@ -77,11 +78,16 @@ def resolve_worker_count(n_workers: int | None = None) -> int:
     return max(0, parse_configured_workers() or 0) if n_workers is None else max(0, n_workers)
 
 
-def build_trex_port_pairs(n_workers: int | None = None) -> tuple[TrexPortPair, ...]:
-    """Строит список TRex inside/outside пар под текущее число workers."""
+def active_memif_pair_count_for_workers(n_workers: int | None = None) -> int:
+    """Возвращает число memif-пар, которые участвуют в трафике для заданного числа workers."""
     worker_count = resolve_worker_count(n_workers)
-    pair_count = memif_pair_count_for_workers(worker_count)
-    memif_pairs = memif_pairs_for_workers(worker_count)
+    return min(memif_topology_pair_count(), memif_pair_count_for_workers(worker_count))
+
+
+def build_trex_port_pairs() -> tuple[TrexPortPair, ...]:
+    """Строит полный фиксированный список TRex inside/outside пар под runtime-топологию."""
+    pair_count = memif_topology_pair_count()
+    memif_pairs = memif_topology_pairs()
 
     pairs: list[TrexPortPair] = []
     for pair_index in range(pair_count):
@@ -108,10 +114,16 @@ def build_trex_port_pairs(n_workers: int | None = None) -> tuple[TrexPortPair, .
     return tuple(pairs)
 
 
-def load_trex_ports(n_workers: int | None = None) -> tuple[TrexPort, ...]:
+def build_active_trex_port_pairs(n_workers: int | None = None) -> tuple[TrexPortPair, ...]:
+    """Возвращает первые N порт-пар из фиксированной топологии для текущего числа workers."""
+    pair_count = active_memif_pair_count_for_workers(n_workers)
+    return build_trex_port_pairs()[:pair_count]
+
+
+def load_trex_ports() -> tuple[TrexPort, ...]:
     """Возвращает плоский список TRex-портов для load-топологии."""
     ports: list[TrexPort] = []
-    for pair in build_trex_port_pairs(n_workers=n_workers):
+    for pair in build_trex_port_pairs():
         ports.append(pair.inside)
         ports.append(pair.outside)
     return tuple(ports)
@@ -125,9 +137,8 @@ def resolve_trex_data_cores(n_workers: int | None = None, requested_cores: int |
 
 def resolve_trex_limit_memory_mb(n_workers: int | None = None) -> int:
     """Возвращает `limit_memory` под число memif-пар с запасом до 10 workers."""
-    worker_count = resolve_worker_count(n_workers)
-    target_workers = max(worker_count, TREX_MEMORY_MAX_WORKERS_TARGET)
-    pair_count = memif_pair_count_for_workers(target_workers)
+    del n_workers
+    pair_count = max(memif_topology_pair_count(), TREX_MEMORY_MAX_WORKERS_TARGET)
     return max(TREX_MEMORY_MIN_MB, TREX_MEMORY_BASE_MB + pair_count * TREX_MEMORY_PER_PAIR_MB)
 
 

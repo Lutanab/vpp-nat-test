@@ -16,6 +16,9 @@ from viz_common import format_float, iter_result_rows, resolve_results_dir
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from build_steps_stats import (  # noqa: E402
     all_workers,
@@ -26,6 +29,28 @@ from build_steps_stats import (  # noqa: E402
     worker_for_index,
     worker_index_for_interface,
 )
+
+
+def load_cli_defaults() -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "results_root": DEFAULT_RESULTS_ROOT,
+        "test_name": "worker_scaling_workers_1",
+        "nat_modes": list(NAT_MODES),
+        "flow_count": None,
+        "packet_size": None,
+    }
+    try:
+        from test_nat.config import load_test_configs
+
+        load_config, _search_config, _load_path, _search_path = load_test_configs(None, None)
+        defaults["results_root"] = load_config.results_root
+        defaults["test_name"] = load_config.test_name
+        defaults["nat_modes"] = [load_config.nat_mode]
+        defaults["flow_count"] = load_config.flow_count
+        defaults["packet_size"] = load_config.packet_size
+    except Exception as exc:
+        print(f"warning: failed to load defaults from load config, using script defaults: {exc}")
+    return defaults
 
 
 @dataclass(frozen=True)
@@ -65,38 +90,39 @@ class BatchPoint:
 
 
 def parse_args() -> argparse.Namespace:
+    defaults = load_cli_defaults()
     parser = argparse.ArgumentParser(
         description="Build RX/TX queue batch-size scatter plot from load-test metrics.tsv files.",
     )
     parser.add_argument(
         "--results-root",
         type=Path,
-        default=DEFAULT_RESULTS_ROOT,
-        help=f"Results root directory (default: {DEFAULT_RESULTS_ROOT}).",
+        default=defaults["results_root"],
+        help=f"Results root directory (default: {defaults['results_root']}).",
     )
     parser.add_argument(
         "--test-name",
-        default="worker_scaling_workers_1",
-        help="test_name to read from results/test_name_<name> (default: worker_scaling_workers_1).",
+        default=defaults["test_name"],
+        help=f"test_name to read from results/test_name_<name> (default: {defaults['test_name']}).",
     )
     parser.add_argument(
         "--nat-modes",
         nargs="+",
         choices=NAT_MODES,
-        default=list(NAT_MODES),
-        help=f"NAT modes to include (default: {' '.join(NAT_MODES)}).",
+        default=defaults["nat_modes"],
+        help=f"NAT modes to include (default: {' '.join(defaults['nat_modes'])}).",
     )
     parser.add_argument(
         "--flow-count",
         type=int,
-        default=None,
-        help="Filter by flow_count (default: all found).",
+        default=defaults["flow_count"],
+        help=f"Filter by flow_count (default: {defaults['flow_count']}).",
     )
     parser.add_argument(
         "--packet-size",
         type=int,
-        default=None,
-        help="Filter by packet_size in bytes (default: all found).",
+        default=defaults["packet_size"],
+        help=f"Filter by packet_size in bytes (default: {defaults['packet_size']}).",
     )
     parser.add_argument(
         "--skip-incomplete",
