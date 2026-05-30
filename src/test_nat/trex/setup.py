@@ -15,11 +15,13 @@ from manage_nat.config import TREX_INSTALL_BASE_DIR, TREX_SERVER_BINARY_NAME, TR
 from manage_nat.helpers import PROJECT_ROOT
 from manage_nat.nat_mode import parse_configured_workers
 from manage_nat.network.setup import (
-    MEMIF_INSIDE_A,
-    MEMIF_OUTSIDE,
-    NAT_INSIDE_IP_CIDR,
-    NAT_OUTSIDE_IP_CIDR,
     configure_memif_rx_placement,
+    inside_host_ip_for_pair,
+    inside_ip_cidr_for_pair,
+    memif_pair_count_for_workers,
+    memif_pairs_for_workers,
+    outside_host_ip_for_pair,
+    outside_ip_cidr_for_pair,
 )
 
 TREX_CFG_PATH = PROJECT_ROOT / "configs" / "trex" / "trex_cfg.yaml"
@@ -35,9 +37,13 @@ VPP_MEMIF_PLACEMENT_POLL_INTERVAL_SECONDS = 0.5
 TREX_INSIDE_A_IP = "10.8.1.2"
 TREX_OUTSIDE_IP = "10.8.0.2"
 TREX_PORT_BANDWIDTH_GB = 200
-TREX_LIMIT_MEMORY_MB = 1536
+TREX_MEMORY_BASE_MB = 1024
+TREX_MEMORY_PER_PAIR_MB = 1024
+TREX_MEMORY_MIN_MB = 2048
+TREX_MEMORY_MAX_WORKERS_TARGET = 10
 TREX_MBUF_FACTOR = "0.2"
 TREX_FAILOVER_INTERFACE_WAIT_SECONDS = 10
+TREX_DATA_CORES_PER_PAIR = 1
 
 
 @dataclass(frozen=True)
@@ -52,29 +58,77 @@ class TrexPort:
     default_gw: str
 
 
+@dataclass(frozen=True)
+class TrexPortPair:
+    """Описывает inside/outside пару TRex-портов для одной memif-пары."""
+
+    pair_index: int
+    inside: TrexPort
+    outside: TrexPort
+
+
 def cidr_ip(value: str) -> str:
     """Возвращает IP-часть из строки вида `10.8.1.1/24`."""
     return value.split("/", 1)[0]
 
 
-TREX_PORTS = (
-    TrexPort(
-        name="inside-a",
-        port_id=0,
-        vdev_name="net_memif0",
-        socket_path=MEMIF_INSIDE_A.socket_path,
-        ip=TREX_INSIDE_A_IP,
-        default_gw=cidr_ip(NAT_INSIDE_IP_CIDR),
-    ),
-    TrexPort(
-        name="outside",
-        port_id=1,
-        vdev_name="net_memif1",
-        socket_path=MEMIF_OUTSIDE.socket_path,
-        ip=TREX_OUTSIDE_IP,
-        default_gw=cidr_ip(NAT_OUTSIDE_IP_CIDR),
-    ),
-)
+def resolve_worker_count(n_workers: int | None = None) -> int:
+    """Возвращает нормализованное число workers для построения load-топологии."""
+    return max(0, parse_configured_workers() or 0) if n_workers is None else max(0, n_workers)
+
+
+def build_trex_port_pairs(n_workers: int | None = None) -> tuple[TrexPortPair, ...]:
+    """Строит список TRex inside/outside пар под текущее число workers."""
+    worker_count = resolve_worker_count(n_workers)
+    pair_count = memif_pair_count_for_workers(worker_count)
+    memif_pairs = memif_pairs_for_workers(worker_count)
+
+    pairs: list[TrexPortPair] = []
+    for pair_index in range(pair_count):
+        inside_endpoint, outside_endpoint = memif_pairs[pair_index]
+        inside_port_id = pair_index * 2
+        outside_port_id = inside_port_id + 1
+        inside_port = TrexPort(
+            name="inside-a" if pair_index == 0 else f"inside-{pair_index}",
+            port_id=inside_port_id,
+            vdev_name=f"net_memif{inside_port_id}",
+            socket_path=inside_endpoint.socket_path,
+            ip=inside_host_ip_for_pair(pair_index),
+            default_gw=cidr_ip(inside_ip_cidr_for_pair(pair_index)),
+        )
+        outside_port = TrexPort(
+            name="outside" if pair_index == 0 else f"outside-{pair_index}",
+            port_id=outside_port_id,
+            vdev_name=f"net_memif{outside_port_id}",
+            socket_path=outside_endpoint.socket_path,
+            ip=outside_host_ip_for_pair(pair_index),
+            default_gw=cidr_ip(outside_ip_cidr_for_pair(pair_index)),
+        )
+        pairs.append(TrexPortPair(pair_index=pair_index, inside=inside_port, outside=outside_port))
+    return tuple(pairs)
+
+
+def load_trex_ports(n_workers: int | None = None) -> tuple[TrexPort, ...]:
+    """Возвращает плоский список TRex-портов для load-топологии."""
+    ports: list[TrexPort] = []
+    for pair in build_trex_port_pairs(n_workers=n_workers):
+        ports.append(pair.inside)
+        ports.append(pair.outside)
+    return tuple(ports)
+
+
+def resolve_trex_data_cores(n_workers: int | None = None, requested_cores: int | None = None) -> int:
+    """Возвращает `-c` для TRex: data cores per port pair."""
+    del n_workers
+    return max(1, requested_cores or TREX_DATA_CORES_PER_PAIR)
+
+
+def resolve_trex_limit_memory_mb(n_workers: int | None = None) -> int:
+    """Возвращает `limit_memory` под число memif-пар с запасом до 10 workers."""
+    worker_count = resolve_worker_count(n_workers)
+    target_workers = max(worker_count, TREX_MEMORY_MAX_WORKERS_TARGET)
+    pair_count = memif_pair_count_for_workers(target_workers)
+    return max(TREX_MEMORY_MIN_MB, TREX_MEMORY_BASE_MB + pair_count * TREX_MEMORY_PER_PAIR_MB)
 
 
 def resolve_trex_server_binary() -> Path:
@@ -99,7 +153,7 @@ def resolve_trex_server_binary() -> Path:
 
 def ensure_memif_sockets_exist() -> None:
     """Проверяет, что VPP уже создал нужные memif-сокеты."""
-    missing = [port.socket_path for port in TREX_PORTS if not Path(port.socket_path).exists()]
+    missing = [port.socket_path for port in load_trex_ports() if not Path(port.socket_path).exists()]
     if missing:
         rendered = ", ".join(missing)
         raise RuntimeError(
@@ -110,17 +164,19 @@ def ensure_memif_sockets_exist() -> None:
 
 def render_trex_config() -> str:
     """Генерирует TRex server config для inside/outside memif-портов стенда."""
+    ports = load_trex_ports()
+    limit_memory_mb = resolve_trex_limit_memory_mb()
     interface_lines = "\n".join(
         f'    - "--vdev={port.vdev_name},role=slave,id=0,socket-abstract=no,socket={port.socket_path}"'
-        for port in TREX_PORTS
+        for port in ports
     )
     port_info_lines = "\n".join(
         f"    - ip: {port.ip}\n      default_gw: {port.default_gw}"
-        for port in TREX_PORTS
+        for port in ports
     )
-    return f"""- port_limit: {len(TREX_PORTS)}
+    return f"""- port_limit: {len(ports)}
   version: 2
-  limit_memory: {TREX_LIMIT_MEMORY_MB}
+  limit_memory: {limit_memory_mb}
   port_bandwidth_gb: {TREX_PORT_BANDWIDTH_GB}
   interfaces:
 {interface_lines}
@@ -243,7 +299,7 @@ def launch_trex_server_process(
     """Запускает TRex server process без ожидания RPC-ready."""
     TREX_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     trex_workdir = trex_binary.parent
-    trex_data_cores = data_cores or max(1, parse_configured_workers() or 0)
+    trex_data_cores = resolve_trex_data_cores(requested_cores=data_cores)
     command = [
         "sudo",
         str(trex_binary),
@@ -302,19 +358,20 @@ def configure_vpp_memif_rx_placement() -> None:
 def setup_trex_server(config_path: Path = TREX_CFG_PATH) -> None:
     """Деплоит TRex server для memif-топологии VPP."""
     click.echo("=== Деплой TRex server ===")
+    trex_data_cores = resolve_trex_data_cores()
     trex_binary = resolve_trex_server_binary()
     ensure_memif_sockets_exist()
     write_trex_config(config_path)
     stop_existing_trex_server(config_paths=(TREX_CFG_PATH, TREX_FAILOVER_CFG_PATH))
-    trex_pid = start_trex_server(trex_binary=trex_binary, config_path=config_path)
+    trex_pid = start_trex_server(trex_binary=trex_binary, config_path=config_path, data_cores=trex_data_cores)
     configure_vpp_memif_rx_placement()
 
     click.echo(f"  ✓ Конфиг TRex записан: {config_path}")
     click.echo(f"  ✓ TRex binary: {trex_binary}")
-    click.echo(f"  ✓ TRex dataplane cores per port pair: {max(1, parse_configured_workers() or 0)}")
+    click.echo(f"  ✓ TRex dataplane cores per port pair: {trex_data_cores}")
     click.echo(f"  ✓ TRex server запущен: pid={trex_pid}, rpc={TREX_RPC_HOST}:{TREX_RPC_PORT}")
     click.echo(f"  ✓ TRex log: {TREX_LOG_PATH}")
-    for port in TREX_PORTS:
+    for port in load_trex_ports():
         click.echo(f"  - port {port.port_id}: {port.name} -> {port.socket_path}")
 
 

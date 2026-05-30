@@ -11,10 +11,15 @@ from typing import Any
 
 from manage_nat.config import TREX_INSTALL_BASE_DIR
 from manage_nat.nat_mode import parse_configured_workers
-from manage_nat.network.setup import NAT_INSIDE_IP_CIDR, NAT_OUTSIDE_IP_CIDR
 
 from ...config import UDP_SPORT_RANGE_END, UDP_SPORT_RANGE_START
-from ..setup import TREX_INSIDE_A_IP, TREX_OUTSIDE_IP, cidr_ip
+from ..setup import (
+    TREX_INSIDE_A_IP,
+    TREX_OUTSIDE_IP,
+    TrexPortPair,
+    build_trex_port_pairs,
+    resolve_trex_data_cores as resolve_trex_setup_data_cores,
+)
 
 CLIENT_PORT = 0
 SERVER_PORT = 1
@@ -43,6 +48,7 @@ class UdpRunResult:
     loss_rate: float
     loss_percent: float
     actual_sent_pps: float
+    trex_queue_counters: tuple[dict[str, Any], ...]
 
 
 def load_trex_stl_api() -> Any:
@@ -89,7 +95,12 @@ def resolve_udp_sport_max(flow_count: int) -> int:
 
 def resolve_trex_data_cores() -> int:
     """Возвращает число TRex data cores, с которым запускается server."""
-    return max(1, parse_configured_workers() or 0)
+    return resolve_trex_setup_data_cores()
+
+
+def resolve_active_port_pairs() -> tuple[TrexPortPair, ...]:
+    """Возвращает активные inside/outside пары TRex-портов для текущей worker-конфигурации."""
+    return build_trex_port_pairs(parse_configured_workers() or 0)
 
 
 def split_evenly(total: int, parts: int) -> list[int]:
@@ -107,6 +118,8 @@ def build_udp_stream(
     target_pps: int,
     packet_size: int = UDP_PACKET_SIZE_BYTES,
     flow_count: int = 1,
+    src_ip: str = TREX_INSIDE_A_IP,
+    dst_ip: str = TREX_OUTSIDE_IP,
     udp_sport_start: int | None = None,
     pg_id: int = UDP_PG_ID,
     core_id: int = -1,
@@ -120,7 +133,7 @@ def build_udp_stream(
         raise ValueError(f"UDP source port range exceeds {UDP_SPORT_RANGE_END}")
     base_packet = (
         api.Ether()
-        / api.IP(src=TREX_INSIDE_A_IP, dst=TREX_OUTSIDE_IP)
+        / api.IP(src=src_ip, dst=dst_ip)
         / api.UDP(sport=sport_min, dport=UDP_DST_PORT, chksum=0)
     )
     padding_size = max(0, packet_size - len(base_packet))
@@ -194,6 +207,8 @@ def build_udp_burst_stream(
     pps: int,
     packet_size: int = UDP_PACKET_SIZE_BYTES,
     flow_count: int = 1,
+    src_ip: str = TREX_INSIDE_A_IP,
+    dst_ip: str = TREX_OUTSIDE_IP,
     udp_sport_start: int | None = None,
     pg_id: int = UDP_PG_ID,
     core_id: int = -1,
@@ -210,7 +225,7 @@ def build_udp_burst_stream(
 
     base_packet = (
         api.Ether()
-        / api.IP(src=TREX_INSIDE_A_IP, dst=TREX_OUTSIDE_IP)
+        / api.IP(src=src_ip, dst=dst_ip)
         / api.UDP(sport=sport_min, dport=UDP_DST_PORT, chksum=0)
     )
     padding_size = max(0, packet_size - len(base_packet))
@@ -342,19 +357,27 @@ def extract_total_counter(flow_stats: dict[str, Any], counter_name: str) -> int:
     return sum(int(value) for value in counter.values() if isinstance(value, (int, float)))
 
 
-def read_udp_counters(client: Any, pg_ids: tuple[int, ...] = (UDP_PG_ID,)) -> tuple[int, int]:
-    """Считывает tx/rx counters по PGID-статистике UDP stream."""
+def read_udp_counters_by_pg_id(client: Any, pg_ids: tuple[int, ...]) -> dict[int, tuple[int, int]]:
+    """Считывает tx/rx counters по каждому PG ID отдельно."""
     pgid_stats = client.get_pgid_stats(pgid_list=list(pg_ids))
     flow_stats_by_id = pgid_stats.get("flow_stats", {})
 
-    tx_pkts = 0
-    rx_pkts = 0
+    counters: dict[int, tuple[int, int]] = {}
     for pg_id in pg_ids:
         flow_stats = flow_stats_by_id.get(pg_id) or flow_stats_by_id.get(str(pg_id))
         if flow_stats is None:
             raise RuntimeError(f"TRex did not return flow stats for PG ID {pg_id}")
-        tx_pkts += extract_total_counter(flow_stats, "tx_pkts")
-        rx_pkts += extract_total_counter(flow_stats, "rx_pkts")
+        tx_pkts = extract_total_counter(flow_stats, "tx_pkts")
+        rx_pkts = extract_total_counter(flow_stats, "rx_pkts")
+        counters[pg_id] = (tx_pkts, rx_pkts)
+    return counters
+
+
+def read_udp_counters(client: Any, pg_ids: tuple[int, ...] = (UDP_PG_ID,)) -> tuple[int, int]:
+    """Считывает tx/rx counters по PGID-статистике UDP stream."""
+    counters_by_pg_id = read_udp_counters_by_pg_id(client, pg_ids=pg_ids)
+    tx_pkts = sum(tx_pkts for tx_pkts, _rx_pkts in counters_by_pg_id.values())
+    rx_pkts = sum(rx_pkts for _tx_pkts, rx_pkts in counters_by_pg_id.values())
     return tx_pkts, rx_pkts
 
 
@@ -374,15 +397,38 @@ def calculate_expected_packets(target_pps: int, duration: float, tx_packets: int
     return max(tx_packets, target_packets)
 
 
-def configure_l3_mode(client: Any) -> None:
+def configure_l3_mode(client: Any, port_pairs: tuple[TrexPortPair, ...] | None = None) -> None:
     """Настраивает L3/ARP для отправляющего и принимающего TRex-портов."""
-    ports = [CLIENT_PORT, SERVER_PORT]
+    active_pairs = port_pairs if port_pairs is not None else resolve_active_port_pairs()[:1]
+    ports: list[int] = []
+    for pair in active_pairs:
+        ports.extend((pair.inside.port_id, pair.outside.port_id))
     client.set_service_mode(ports=ports, enabled=True)
     try:
-        client.set_l3_mode(port=CLIENT_PORT, src_ipv4=TREX_INSIDE_A_IP, dst_ipv4=cidr_ip(NAT_INSIDE_IP_CIDR))
-        client.set_l3_mode(port=SERVER_PORT, src_ipv4=TREX_OUTSIDE_IP, dst_ipv4=cidr_ip(NAT_OUTSIDE_IP_CIDR))
+        for pair in active_pairs:
+            client.set_l3_mode(
+                port=pair.inside.port_id,
+                src_ipv4=pair.inside.ip,
+                dst_ipv4=pair.inside.default_gw,
+            )
+            client.set_l3_mode(
+                port=pair.outside.port_id,
+                src_ipv4=pair.outside.ip,
+                dst_ipv4=pair.outside.default_gw,
+            )
     finally:
         client.set_service_mode(ports=ports, enabled=False)
+
+
+def select_load_port_pairs(port_pairs: tuple[TrexPortPair, ...], flow_count: int) -> tuple[TrexPortPair, ...]:
+    """Выбирает количество memif-пар, которые будут задействованы в конкретном прогоне."""
+    if not port_pairs:
+        raise RuntimeError("No active TRex port pairs found")
+    if flow_count <= 0:
+        raise ValueError("flow_count must be positive")
+    if flow_count == 1:
+        return port_pairs[:1]
+    return port_pairs[: min(len(port_pairs), flow_count)]
 
 
 def run_udp_measurement(
@@ -406,36 +452,92 @@ def run_udp_measurement(
 
     api = load_trex_stl_api()
     client = api.STLClient(server=TREX_SERVER_HOST)
-    ports = [CLIENT_PORT, SERVER_PORT]
+    all_port_pairs = resolve_active_port_pairs()
+    active_pairs = select_load_port_pairs(all_port_pairs, flow_count=flow_count)
+    ports: list[int] = []
+    inside_ports: list[int] = []
+    for pair in active_pairs:
+        inside_ports.append(pair.inside.port_id)
+        ports.extend((pair.inside.port_id, pair.outside.port_id))
     trex_data_cores = resolve_trex_data_cores()
-    streams, pg_ids = build_udp_streams(
-        api=api,
-        target_pps=target_pps,
-        packet_size=packet_size,
-        flow_count=flow_count,
-        trex_data_cores=trex_data_cores,
-    )
+    pair_count = len(active_pairs)
+    pps_by_pair = split_evenly(target_pps, pair_count)
+    flows_by_pair = [1] * pair_count if flow_count == 1 else split_evenly(flow_count, pair_count)
+    streams_by_port: dict[int, list[Any]] = {port: [] for port in inside_ports}
+    pg_ids: list[int] = []
+    pair_run_plan: list[tuple[TrexPortPair, int, int, int]] = []
+    next_sport = UDP_SPORT_RANGE_START
+    for pair_slot, (pair, pair_pps, pair_flows) in enumerate(zip(active_pairs, pps_by_pair, flows_by_pair, strict=True)):
+        pg_id = UDP_PG_ID + pair_slot
+        pg_ids.append(pg_id)
+        pair_run_plan.append((pair, pg_id, pair_pps, pair_flows))
+        sport_start = None if flow_count == 1 else next_sport
+        streams_by_port[pair.inside.port_id].append(
+            build_udp_stream(
+                api=api,
+                target_pps=pair_pps,
+                packet_size=packet_size,
+                flow_count=pair_flows,
+                src_ip=pair.inside.ip,
+                dst_ip=pair.outside.ip,
+                udp_sport_start=sport_start,
+                pg_id=pg_id,
+                core_id=pair_slot % trex_data_cores,
+                name=f"udp_inside_to_outside_pair_{pair.pair_index}",
+            )
+        )
+        if flow_count > 1:
+            next_sport += pair_flows
 
     try:
         client.connect()
         client.reset(ports=ports)
-        configure_l3_mode(client)
-        client.remove_all_streams(ports=[CLIENT_PORT])
-        client.add_streams(streams, ports=[CLIENT_PORT])
+        configure_l3_mode(client, port_pairs=active_pairs)
+        client.remove_all_streams(ports=inside_ports)
+        for port_id in inside_ports:
+            client.add_streams(streams_by_port[port_id], ports=[port_id])
         client.clear_stats(ports=ports)
-        client.start(ports=[CLIENT_PORT])
+        client.start(ports=inside_ports)
         if warmup_sec > 0:
             time.sleep(warmup_sec)
             client.clear_stats(ports=ports)
         measurement_start_epoch = time.time()
         time.sleep(duration)
-        client.stop(ports=[CLIENT_PORT])
+        client.stop(ports=inside_ports)
         measurement_end_epoch = time.time()
-        tx_packets, rx_packets = read_udp_counters(client, pg_ids=pg_ids)
+        counters_by_pg_id = read_udp_counters_by_pg_id(client, pg_ids=tuple(pg_ids))
+        tx_packets = sum(tx_pkts for tx_pkts, _rx_pkts in counters_by_pg_id.values())
+        rx_packets = sum(rx_pkts for _tx_pkts, rx_pkts in counters_by_pg_id.values())
         expected_packets = calculate_expected_packets(target_pps, duration, tx_packets)
         received_packets = rx_packets
         lost_packets = max(0, expected_packets - received_packets)
         loss_rate = lost_packets / expected_packets
+        trex_queue_counters: list[dict[str, Any]] = []
+        for pair, pg_id, pair_target_pps, pair_flows in pair_run_plan:
+            pair_tx_packets, pair_rx_packets = counters_by_pg_id[pg_id]
+            pair_expected_packets = calculate_expected_packets(pair_target_pps, duration, pair_tx_packets)
+            pair_lost_packets = max(0, pair_expected_packets - pair_rx_packets)
+            pair_loss_rate = pair_lost_packets / pair_expected_packets
+            trex_queue_counters.append(
+                {
+                    "pair_index": pair.pair_index,
+                    "queue_id": 0,
+                    "pg_id": pg_id,
+                    "inside_port_id": pair.inside.port_id,
+                    "outside_port_id": pair.outside.port_id,
+                    "inside_ip": pair.inside.ip,
+                    "outside_ip": pair.outside.ip,
+                    "target_pps": pair_target_pps,
+                    "flow_count": pair_flows,
+                    "expected_packets": pair_expected_packets,
+                    "tx_packets": pair_tx_packets,
+                    "rx_packets": pair_rx_packets,
+                    "lost_packets": pair_lost_packets,
+                    "loss_rate": pair_loss_rate,
+                    "loss_percent": pair_loss_rate * 100,
+                    "actual_sent_pps": pair_tx_packets / duration,
+                }
+            )
         return UdpRunResult(
             target_pps=target_pps,
             duration_sec=duration,
@@ -450,10 +552,11 @@ def run_udp_measurement(
             loss_rate=loss_rate,
             loss_percent=loss_rate * 100,
             actual_sent_pps=tx_packets / duration,
+            trex_queue_counters=tuple(trex_queue_counters),
         )
     finally:
         try:
-            client.stop(ports=[CLIENT_PORT])
+            client.stop(ports=inside_ports)
         except Exception:
             pass
         client.disconnect()

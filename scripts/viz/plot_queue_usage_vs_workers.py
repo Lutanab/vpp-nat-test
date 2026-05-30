@@ -16,16 +16,39 @@ from viz_common import format_float, iter_result_rows, resolve_results_dir
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from build_steps_stats import (  # noqa: E402
-    MEMIF_INTERFACES,
     VPP_MEMIF_ROLE,
     load_metrics_rows,
     parse_int,
-    queue_indices,
     queue_used_percent,
     tx_rx_directions,
 )
+
+
+def load_cli_defaults() -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "results_root": DEFAULT_RESULTS_ROOT,
+        "test_name": "worker_scaling_workers_1",
+        "nat_modes": list(NAT_MODES),
+        "flow_count": None,
+        "packet_size": None,
+    }
+    try:
+        from test_nat.config import load_test_configs
+
+        load_config, _search_config, _load_path, _search_path = load_test_configs(None, None)
+        defaults["results_root"] = load_config.results_root
+        defaults["test_name"] = load_config.test_name
+        defaults["nat_modes"] = [load_config.nat_mode]
+        defaults["flow_count"] = load_config.flow_count
+        defaults["packet_size"] = load_config.packet_size
+    except Exception as exc:
+        print(f"warning: failed to load defaults from load config, using script defaults: {exc}")
+    return defaults
 
 
 @dataclass(frozen=True)
@@ -48,7 +71,9 @@ class QueueUsagePoint:
     flow_count: int
     packet_size: int
     direction: str
+    iface_role: str
     interface: str
+    pair_index: int
     queue_id: int
     avg_used_percent: float
     min_used_percent: float
@@ -63,38 +88,39 @@ class QueueUsagePoint:
 
 
 def parse_args() -> argparse.Namespace:
+    defaults = load_cli_defaults()
     parser = argparse.ArgumentParser(
         description="Build RX/TX memif queue occupancy plots from load-test metrics.tsv files.",
     )
     parser.add_argument(
         "--results-root",
         type=Path,
-        default=DEFAULT_RESULTS_ROOT,
-        help=f"Results root directory (default: {DEFAULT_RESULTS_ROOT}).",
+        default=defaults["results_root"],
+        help=f"Results root directory (default: {defaults['results_root']}).",
     )
     parser.add_argument(
         "--test-name",
-        default="worker_scaling_workers_1",
-        help="test_name to read from results/test_name_<name> (default: worker_scaling_workers_1).",
+        default=defaults["test_name"],
+        help=f"test_name to read from results/test_name_<name> (default: {defaults['test_name']}).",
     )
     parser.add_argument(
         "--nat-modes",
         nargs="+",
         choices=NAT_MODES,
-        default=list(NAT_MODES),
-        help=f"NAT modes to include (default: {' '.join(NAT_MODES)}).",
+        default=defaults["nat_modes"],
+        help=f"NAT modes to include (default: {' '.join(defaults['nat_modes'])}).",
     )
     parser.add_argument(
         "--flow-count",
         type=int,
-        default=None,
-        help="Filter by flow_count (default: all found).",
+        default=defaults["flow_count"],
+        help=f"Filter by flow_count (default: {defaults['flow_count']}).",
     )
     parser.add_argument(
         "--packet-size",
         type=int,
-        default=None,
-        help="Filter by packet_size in bytes (default: all found).",
+        default=defaults["packet_size"],
+        help=f"Filter by packet_size in bytes (default: {defaults['packet_size']}).",
     )
     parser.add_argument(
         "--include-incomplete",
@@ -229,12 +255,14 @@ def collect_usage_points(selected_steps: list[SelectedStep]) -> list[QueueUsageP
             print(f"warning: no metrics rows inside selected measurement window in {selected.result_dir}")
             continue
 
-        for interface in MEMIF_INTERFACES:
-            for queue_id in queue_indices(step_rows, f"{interface}/"):
+        for interface in interfaces_in_rows(step_rows):
+            pair_index = pair_index_for_interface(step_rows, interface)
+            iface_role = iface_role_for_interface(step_rows, interface)
+            for queue_id in queue_ids_for_interface(step_rows, interface):
                 for direction, ring_direction in directions.items():
                     values = queue_used_values(
                         rows=step_rows,
-                        interface_prefix=f"{interface}/",
+                        interface=interface,
                         ring_direction=ring_direction,
                         queue_id=queue_id,
                     )
@@ -247,7 +275,9 @@ def collect_usage_points(selected_steps: list[SelectedStep]) -> list[QueueUsageP
                             flow_count=selected.row.flow_count,
                             packet_size=selected.row.packet_size,
                             direction=direction,
+                            iface_role=iface_role,
                             interface=interface,
+                            pair_index=pair_index,
                             queue_id=queue_id,
                             avg_used_percent=sum(values) / len(values),
                             min_used_percent=min(values),
@@ -264,13 +294,57 @@ def collect_usage_points(selected_steps: list[SelectedStep]) -> list[QueueUsageP
 
     return sorted(
         points,
-        key=lambda item: (item.n_workers, item.direction, item.interface, item.queue_id, item.nat_mode),
+        key=lambda item: (item.n_workers, item.direction, item.iface_role, item.pair_index, item.interface, item.queue_id, item.nat_mode),
     )
+
+
+def interfaces_in_rows(rows: list[dict[str, Any]]) -> list[str]:
+    interfaces = {
+        row.get("interface") or ""
+        for row in rows
+        if row.get("source") == "memif" and (row.get("interface") or "")
+    }
+    return sorted(interfaces)
+
+
+def queue_ids_for_interface(rows: list[dict[str, Any]], interface: str) -> list[int]:
+    queue_ids = {
+        queue_id
+        for row in rows
+        if row.get("source") == "memif"
+        and (row.get("interface") or "") == interface
+        and (queue_id := parse_int(row.get("ring_index"))) is not None
+    }
+    return sorted(queue_ids)
+
+
+def pair_index_for_interface(rows: list[dict[str, Any]], interface: str) -> int:
+    for row in rows:
+        if row.get("source") != "memif":
+            continue
+        if (row.get("interface") or "") != interface:
+            continue
+        pair_index = parse_int(row.get("pair_index"))
+        if pair_index is not None:
+            return pair_index
+    return -1
+
+
+def iface_role_for_interface(rows: list[dict[str, Any]], interface: str) -> str:
+    for row in rows:
+        if row.get("source") != "memif":
+            continue
+        if (row.get("interface") or "") != interface:
+            continue
+        role = (row.get("iface_role") or "").strip().lower()
+        if role:
+            return role
+    return "unknown"
 
 
 def queue_used_values(
     rows: list[dict[str, Any]],
-    interface_prefix: str,
+    interface: str,
     ring_direction: str,
     queue_id: int,
 ) -> list[float]:
@@ -278,7 +352,7 @@ def queue_used_values(
     for row in rows:
         if row.get("source") != "memif":
             continue
-        if not (row.get("interface") or "").startswith(interface_prefix):
+        if (row.get("interface") or "") != interface:
             continue
         if row.get("ring_direction") != ring_direction:
             continue
@@ -313,7 +387,9 @@ def write_tsv(output: Path, points: list[QueueUsagePoint]) -> None:
                 "flow_count",
                 "packet_size",
                 "direction",
+                "iface_role",
                 "interface",
+                "pair_index",
                 "queue_id",
                 "avg_used_percent",
                 "min_used_percent",
@@ -335,7 +411,9 @@ def write_tsv(output: Path, points: list[QueueUsagePoint]) -> None:
                     point.flow_count,
                     point.packet_size,
                     point.direction,
+                    point.iface_role,
                     point.interface,
+                    point.pair_index,
                     point.queue_id,
                     format_float(point.avg_used_percent),
                     format_float(point.min_used_percent),
@@ -352,9 +430,10 @@ def write_tsv(output: Path, points: list[QueueUsagePoint]) -> None:
 
 
 def queue_jitter(point: QueueUsagePoint) -> float:
-    interface_offset = {"memif10": -0.055, "memif20": 0.055}.get(point.interface, 0.0)
-    queue_offset = ((point.queue_id % 8) - 3.5) * 0.012
-    return interface_offset + queue_offset
+    role_offset = {"inside": -0.055, "outside": 0.055}.get(point.iface_role, 0.0)
+    pair_offset = ((point.pair_index % 8) - 3.5) * 0.012 if point.pair_index >= 0 else 0.0
+    queue_offset = ((point.queue_id % 8) - 3.5) * 0.003
+    return role_offset + pair_offset + queue_offset
 
 
 def plot_points(output: Path, points: list[QueueUsagePoint], title: str) -> None:
@@ -362,21 +441,23 @@ def plot_points(output: Path, points: list[QueueUsagePoint], title: str) -> None
 
     configure_plot_style()
 
-    interface_colors = {
-        "memif10": "#4e79a7",
-        "memif20": "#f28e2b",
+    role_colors = {
+        "inside": "#4e79a7",
+        "outside": "#f28e2b",
+        "unknown": "#999999",
     }
-    interface_markers = {
-        "memif10": "o",
-        "memif20": "s",
+    role_markers = {
+        "inside": "o",
+        "outside": "s",
+        "unknown": "x",
     }
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 6), sharey=True)
     x_ticks = sorted({point.n_workers for point in points})
     for ax, direction in zip(axes, ("rx", "tx"), strict=True):
         direction_points = [point for point in points if point.direction == direction]
-        for interface in MEMIF_INTERFACES:
-            series = [point for point in direction_points if point.interface == interface]
+        for iface_role in ("inside", "outside", "unknown"):
+            series = [point for point in direction_points if point.iface_role == iface_role]
             if not series:
                 continue
             xs = [point.n_workers + queue_jitter(point) for point in series]
@@ -385,15 +466,16 @@ def plot_points(output: Path, points: list[QueueUsagePoint], title: str) -> None
                 xs,
                 ys,
                 s=64,
-                marker=interface_markers.get(interface, "o"),
-                color=interface_colors.get(interface),
+                marker=role_markers.get(iface_role, "o"),
+                color=role_colors.get(iface_role),
                 edgecolors="white",
                 linewidths=0.7,
                 alpha=0.88,
-                label=interface,
+                label=iface_role,
             )
             for x_value, y_value, point in zip(xs, ys, series, strict=True):
-                ax.text(x_value + 0.012, y_value, f"q{point.queue_id}", fontsize=7, alpha=0.72)
+                pair_label = f"p{point.pair_index}" if point.pair_index >= 0 else "p?"
+                ax.text(x_value + 0.012, y_value, pair_label, fontsize=7, alpha=0.72)
 
         ax.set_title(direction.upper())
         ax.set_xlabel("n_workers")
@@ -425,6 +507,12 @@ def main() -> int:
     points = collect_usage_points(selected_steps)
     if not points:
         print("error: no queue usage points found")
+        return 1
+
+    try:
+        import matplotlib.pyplot as plt  # noqa: F401
+    except ImportError:
+        print("error: matplotlib is not installed. Install with: pip install matplotlib")
         return 1
 
     write_tsv(tsv_output, points)

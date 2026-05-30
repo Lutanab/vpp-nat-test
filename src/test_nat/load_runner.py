@@ -205,15 +205,18 @@ def restart_trex_server(reason: str, logger: RunLogger) -> None:
 
 
 def trex_links_are_up() -> bool:
-    """Проверяет, что оба TRex-порта видят link UP."""
-    from .trex.run.udp import CLIENT_PORT, SERVER_PORT, TREX_SERVER_HOST, load_trex_stl_api
+    """Проверяет, что все активные TRex load-порты видят link UP."""
+    from .trex.run.udp import TREX_SERVER_HOST, load_trex_stl_api
+    from .trex.setup import load_trex_ports
 
     api = load_trex_stl_api()
     client = api.STLClient(server=TREX_SERVER_HOST)
     try:
         client.connect()
-        for port in (CLIENT_PORT, SERVER_PORT):
-            if client.get_port_attr(port).get("link") != "UP":
+        for port in load_trex_ports():
+            if port.port_id < 0:
+                continue
+            if client.get_port_attr(port.port_id).get("link") != "UP":
                 return False
         return True
     except Exception:
@@ -261,6 +264,7 @@ def run_boundary_search(
             f"received={format_number(measurement.received_packets)}, "
             f"loss={format_number(measurement.lost_packets)} {format_verdict(passed)}"
         )
+        log_trex_queue_counters(logger, step_index, measurement)
         step = LoadStep(
             phase=phase,
             step_index=step_index,
@@ -386,6 +390,7 @@ def build_step_result(step: LoadStep) -> dict[str, Any]:
         "lost_packets": measurement.lost_packets,
         "loss_rate": measurement.loss_rate,
         "loss_percent": measurement.loss_percent,
+        "trex_queue_counters": [dict(counter) for counter in measurement.trex_queue_counters],
     }
 
 
@@ -439,6 +444,25 @@ def format_number(value: int | float) -> str:
 def format_verdict(passed: bool) -> str:
     """Форматирует итог ступеньки."""
     return "PASSED" if passed else "FAILED"
+
+
+def log_trex_queue_counters(logger: RunLogger, step_index: int, measurement: UdpRunResult) -> None:
+    """Пишет per-queue TRex counters в program.log и stdout."""
+    if not measurement.trex_queue_counters:
+        return
+    lines = [f"step #{step_index}: TRex per-queue counters"]
+    for counter in measurement.trex_queue_counters:
+        lines.append(
+            "  "
+            f"pair={counter['pair_index']} q={counter['queue_id']} pg_id={counter['pg_id']}: "
+            f"expected={format_number(counter['expected_packets'])}, "
+            f"tx={format_number(counter['tx_packets'])}, "
+            f"rx={format_number(counter['rx_packets'])}, "
+            f"loss={format_number(counter['lost_packets'])} "
+            f"({counter['loss_percent']:.6f}%), "
+            f"actual_sent_pps={format_number(counter['actual_sent_pps'])}"
+        )
+    logger("\n".join(lines))
 
 
 def log_failed_subprocess(name: str, result: subprocess.CompletedProcess[str], logger: RunLogger) -> None:

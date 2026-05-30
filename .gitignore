@@ -23,3 +23,4 @@ configs/trex/trex.log
 configs/trex/trex.pid
 
 virtual_machines/
+configs/trex/trex_cfg.yaml

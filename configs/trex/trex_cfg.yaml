@@ -1,12 +1,30 @@
-- port_limit: 2
+- port_limit: 8
   version: 2
-  limit_memory: 1536
+  limit_memory: 11264
   port_bandwidth_gb: 200
   interfaces:
     - "--vdev=net_memif0,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-inside-a.sock"
     - "--vdev=net_memif1,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-outside.sock"
+    - "--vdev=net_memif2,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-inside-1.sock"
+    - "--vdev=net_memif3,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-outside-1.sock"
+    - "--vdev=net_memif4,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-inside-2.sock"
+    - "--vdev=net_memif5,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-outside-2.sock"
+    - "--vdev=net_memif6,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-inside-3.sock"
+    - "--vdev=net_memif7,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-outside-3.sock"
   port_info:
     - ip: 10.8.1.2
       default_gw: 10.8.1.1
     - ip: 10.8.0.2
       default_gw: 10.8.0.1
+    - ip: 10.8.1.6
+      default_gw: 10.8.1.5
+    - ip: 10.8.0.6
+      default_gw: 10.8.0.5
+    - ip: 10.8.1.10
+      default_gw: 10.8.1.9
+    - ip: 10.8.0.10
+      default_gw: 10.8.0.9
+    - ip: 10.8.1.14
+      default_gw: 10.8.1.13
+    - ip: 10.8.0.14
+      default_gw: 10.8.0.13

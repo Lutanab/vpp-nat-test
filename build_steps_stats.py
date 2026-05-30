@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import csv
 import json
+import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 VPP_MEMIF_ROLE = "master"
 MEMIF_INTERFACES = ("memif10", "memif20")
+WORKER_INDEX_RE = re.compile(r"(\d+)$")
+MEMIF_IFACE_RE = re.compile(r"^memif(?P<socket_id>\d+)/(?P<interface_id>\d+)$")
 
 
-def load_results_dir() -> Path:
+def load_results_dir(n_workers: int | None = None) -> Path:
     repo_root = Path(__file__).resolve().parent
     src_dir = repo_root / "src"
     if str(src_dir) not in sys.path:
@@ -20,6 +25,8 @@ def load_results_dir() -> Path:
     from test_nat.config import build_results_dir, load_test_configs
 
     config, _search, _load_path, _search_path = load_test_configs(None, None)
+    if n_workers is not None:
+        config = replace(config, n_workers=n_workers)
     return build_results_dir(config)
 
 
@@ -205,9 +212,64 @@ def all_workers(metrics_rows: list[dict[str, Any]]) -> list[str]:
 
 
 def worker_for_queue(workers: list[str], queue_id: int) -> str | None:
-    if queue_id < 0 or queue_id >= len(workers):
+    return worker_for_index(workers, queue_id)
+
+
+def worker_for_index(workers: list[str], worker_index: int | None) -> str | None:
+    if worker_index is None or worker_index < 0:
         return None
-    return workers[queue_id]
+    by_index: dict[int, str] = {}
+    for worker in workers:
+        match = WORKER_INDEX_RE.search(worker)
+        if match is None:
+            continue
+        by_index[int(match.group(1))] = worker
+    if worker_index in by_index:
+        return by_index[worker_index]
+    if worker_index >= len(workers):
+        return None
+    return workers[worker_index]
+
+
+def memif_interfaces(metrics_rows: list[dict[str, Any]]) -> list[str]:
+    interfaces = {
+        (row.get("interface") or "")
+        for row in metrics_rows
+        if row.get("source") == "memif" and (row.get("interface") or "")
+    }
+
+    def sort_key(interface: str) -> tuple[int, int]:
+        match = MEMIF_IFACE_RE.match(interface)
+        if match is None:
+            return (1_000_000, 1_000_000)
+        return (int(match.group("socket_id")), int(match.group("interface_id")))
+
+    return sorted(interfaces, key=sort_key)
+
+
+def worker_index_for_interface(rows: list[dict[str, Any]], interface: str) -> int | None:
+    worker_indices = [
+        parse_int(row.get("worker_index"))
+        for row in rows
+        if row.get("source") == "memif" and (row.get("interface") or "") == interface
+    ]
+    for worker_index in worker_indices:
+        if worker_index is not None:
+            return worker_index
+
+    match = MEMIF_IFACE_RE.match(interface)
+    if match is None:
+        return None
+    socket_id = int(match.group("socket_id"))
+    if 10 <= socket_id <= 19:
+        return socket_id - 10
+    if 20 <= socket_id <= 29:
+        return socket_id - 20
+    return None
+
+
+def interface_column_prefix(interface: str) -> str:
+    return interface.replace("/", "_")
 
 
 def queue_indices(metrics_rows: list[dict[str, Any]], prefix: str) -> list[int]:
@@ -221,8 +283,16 @@ def queue_indices(metrics_rows: list[dict[str, Any]], prefix: str) -> list[int]:
     return sorted(indices)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n-workers", type=int, default=None, help="Override n_workers from load config")
+    parser.add_argument("--results-dir", type=Path, default=None, help="Use explicit results directory")
+    return parser.parse_args()
+
+
 def main() -> int:
-    results_dir = load_results_dir()
+    args = parse_args()
+    results_dir = args.results_dir or load_results_dir(args.n_workers)
     history_path = results_dir / "history.json"
     metrics_path = results_dir / "metrics.tsv"
     output_path = results_dir / "steps_stats.tsv"
@@ -240,8 +310,8 @@ def main() -> int:
     metrics_rows = load_metrics_rows(metrics_path)
     tx_direction, rx_direction = tx_rx_directions(VPP_MEMIF_ROLE)
     workers = all_workers(metrics_rows)
-    memif10_queues = queue_indices(metrics_rows, "memif10/")
-    memif20_queues = queue_indices(metrics_rows, "memif20/")
+    interfaces = memif_interfaces(metrics_rows)
+    interface_queues = {interface: queue_indices(metrics_rows, interface) for interface in interfaces}
 
     fieldnames = [
         "step_index",
@@ -249,16 +319,13 @@ def main() -> int:
         "verdict",
         "loss_percent",
     ]
-    for queue_id in memif10_queues:
-        fieldnames.append(f"memif10_q{queue_id}_tx_usage_perc")
-        fieldnames.append(f"memif10_q{queue_id}_tx_batch_size")
-        fieldnames.append(f"memif10_q{queue_id}_rx_usage_perc")
-        fieldnames.append(f"memif10_q{queue_id}_rx_batch_size")
-    for queue_id in memif20_queues:
-        fieldnames.append(f"memif20_q{queue_id}_tx_usage_perc")
-        fieldnames.append(f"memif20_q{queue_id}_tx_batch_size")
-        fieldnames.append(f"memif20_q{queue_id}_rx_usage_perc")
-        fieldnames.append(f"memif20_q{queue_id}_rx_batch_size")
+    for interface in interfaces:
+        prefix = interface_column_prefix(interface)
+        for queue_id in interface_queues[interface]:
+            fieldnames.append(f"{prefix}_q{queue_id}_tx_usage_perc")
+            fieldnames.append(f"{prefix}_q{queue_id}_tx_batch_size")
+            fieldnames.append(f"{prefix}_q{queue_id}_rx_usage_perc")
+            fieldnames.append(f"{prefix}_q{queue_id}_rx_batch_size")
     fieldnames.extend(f"worker_packets_{worker}" for worker in workers)
 
     with output_path.open("w", encoding="utf-8", newline="") as handle:
@@ -283,8 +350,8 @@ def main() -> int:
             worker_packets = worker_packets_from_runtime(step_rows)
             rx_batch_sizes = runtime_batch_sizes_by_worker(step_rows, "memif-input")
             tx_batch_sizes_by_interface = {
-                interface: runtime_batch_sizes_by_worker(step_rows, f"{interface}/0-tx")
-                for interface in MEMIF_INTERFACES
+                interface: runtime_batch_sizes_by_worker(step_rows, f"{interface}-tx")
+                for interface in interfaces
             }
             row: dict[str, Any] = {
                 "step_index": step.get("step_index"),
@@ -293,51 +360,32 @@ def main() -> int:
                 "loss_percent": step.get("loss_percent"),
             }
 
-            for queue_id in memif10_queues:
-                tx_avg = average_queue_used_percent(
-                    step_rows,
-                    "memif10/",
-                    tx_direction,
-                    vpp_role=VPP_MEMIF_ROLE,
-                    ring_index=queue_id,
-                )
-                rx_avg = average_queue_used_percent(
-                    step_rows,
-                    "memif10/",
-                    rx_direction,
-                    vpp_role=VPP_MEMIF_ROLE,
-                    ring_index=queue_id,
-                )
-                worker = worker_for_queue(workers, queue_id)
-                tx_batch = None if worker is None else tx_batch_sizes_by_interface["memif10"].get(worker)
+            for interface in interfaces:
+                prefix = interface_column_prefix(interface)
+                worker_index = worker_index_for_interface(step_rows, interface)
+                worker = worker_for_index(workers, worker_index)
+                tx_batch = None if worker is None else tx_batch_sizes_by_interface.get(interface, {}).get(worker)
                 rx_batch = None if worker is None else rx_batch_sizes.get(worker)
-                row[f"memif10_q{queue_id}_tx_usage_perc"] = "" if tx_avg is None else f"{tx_avg:.6f}"
-                row[f"memif10_q{queue_id}_tx_batch_size"] = "" if tx_batch is None else f"{tx_batch:.6f}"
-                row[f"memif10_q{queue_id}_rx_usage_perc"] = "" if rx_avg is None else f"{rx_avg:.6f}"
-                row[f"memif10_q{queue_id}_rx_batch_size"] = "" if rx_batch is None else f"{rx_batch:.6f}"
 
-            for queue_id in memif20_queues:
-                tx_avg = average_queue_used_percent(
-                    step_rows,
-                    "memif20/",
-                    tx_direction,
-                    vpp_role=VPP_MEMIF_ROLE,
-                    ring_index=queue_id,
-                )
-                rx_avg = average_queue_used_percent(
-                    step_rows,
-                    "memif20/",
-                    rx_direction,
-                    vpp_role=VPP_MEMIF_ROLE,
-                    ring_index=queue_id,
-                )
-                worker = worker_for_queue(workers, queue_id)
-                tx_batch = None if worker is None else tx_batch_sizes_by_interface["memif20"].get(worker)
-                rx_batch = None if worker is None else rx_batch_sizes.get(worker)
-                row[f"memif20_q{queue_id}_tx_usage_perc"] = "" if tx_avg is None else f"{tx_avg:.6f}"
-                row[f"memif20_q{queue_id}_tx_batch_size"] = "" if tx_batch is None else f"{tx_batch:.6f}"
-                row[f"memif20_q{queue_id}_rx_usage_perc"] = "" if rx_avg is None else f"{rx_avg:.6f}"
-                row[f"memif20_q{queue_id}_rx_batch_size"] = "" if rx_batch is None else f"{rx_batch:.6f}"
+                for queue_id in interface_queues[interface]:
+                    tx_avg = average_queue_used_percent(
+                        step_rows,
+                        interface,
+                        tx_direction,
+                        vpp_role=VPP_MEMIF_ROLE,
+                        ring_index=queue_id,
+                    )
+                    rx_avg = average_queue_used_percent(
+                        step_rows,
+                        interface,
+                        rx_direction,
+                        vpp_role=VPP_MEMIF_ROLE,
+                        ring_index=queue_id,
+                    )
+                    row[f"{prefix}_q{queue_id}_tx_usage_perc"] = "" if tx_avg is None else f"{tx_avg:.6f}"
+                    row[f"{prefix}_q{queue_id}_tx_batch_size"] = "" if tx_batch is None else f"{tx_batch:.6f}"
+                    row[f"{prefix}_q{queue_id}_rx_usage_perc"] = "" if rx_avg is None else f"{rx_avg:.6f}"
+                    row[f"{prefix}_q{queue_id}_rx_batch_size"] = "" if rx_batch is None else f"{rx_batch:.6f}"
 
             for worker in workers:
                 row[f"worker_packets_{worker}"] = worker_packets.get(worker, 0)

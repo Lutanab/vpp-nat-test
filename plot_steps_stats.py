@@ -4,16 +4,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
 
 def load_results_dir(n_workers: int | None) -> Path:
     repo_root = Path(__file__).resolve().parent
@@ -64,10 +59,30 @@ def boundary_pps(results_dir: Path, steps: list[dict[str, str]]) -> float | None
     return max(passing_targets) if passing_targets else None
 
 
-def plot_steps(results_dir: Path, output_path: Path) -> None:
+def ensure_steps_stats(results_dir: Path, n_workers: int | None) -> Path:
     steps_path = results_dir / "steps_stats.tsv"
+    if steps_path.exists():
+        return steps_path
+
+    script_path = Path(__file__).resolve().parent / "build_steps_stats.py"
+    command = [sys.executable, str(script_path), "--results-dir", str(results_dir)]
+    if n_workers is not None:
+        command.extend(["--n-workers", str(n_workers)])
+
+    print(f"steps_stats.tsv not found, generating: {' '.join(command)}")
+    subprocess.run(command, check=True)
+    return steps_path
+
+
+def plot_steps(results_dir: Path, output_path: Path, n_workers: int | None) -> None:
+    steps_path = ensure_steps_stats(results_dir, n_workers=n_workers)
     if not steps_path.exists():
-        raise FileNotFoundError(f"steps_stats.tsv not found: {steps_path}")
+        raise FileNotFoundError(f"steps_stats.tsv not found after generation: {steps_path}")
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
     steps = load_steps(steps_path)
     if not steps:
@@ -140,7 +155,11 @@ def main() -> int:
     args = parse_args()
     results_dir = load_results_dir(args.n_workers)
     output_path = args.output or (results_dir / "steps_stats_plot.png")
-    plot_steps(results_dir, output_path)
+    try:
+        plot_steps(results_dir, output_path, n_workers=args.n_workers)
+    except ImportError:
+        print("error: matplotlib is not installed. Install with: pip install matplotlib")
+        return 1
     print(f"written: {output_path}")
     return 0
 

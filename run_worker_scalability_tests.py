@@ -20,7 +20,7 @@ SEARCH_TEMPLATE = ROOT / "configs/loadtest/search/test_config.yaml.template"
 PPS_PLOT = ROOT / "scripts/viz/plot_pps_vs_workers.py"
 RESULTS_ROOT = ROOT / "results"
 NAT_MODE = "none"
-WORKER_COUNTS = range(1, 6)
+WORKER_COUNTS = range(3, 6)
 
 
 ########

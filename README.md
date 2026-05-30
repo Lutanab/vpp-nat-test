@@ -69,10 +69,12 @@ manage-nat network setup <none|nat44|nat_fo> [--n_workers N]
 - обновляет в `/etc/vpp/startup.conf` управляемый блок плагинов (`nat_plugin.so` / `nat_fo_plugin.so`);
 - обновляет `cpu`-параметры VPP в `/etc/vpp/startup.conf` (`main-core` и `corelist-workers` через `--n_workers`);
 - перезапускает VPP;
-- поднимает VPP-сетевую топологию (inside/outside memif), создавая по `N` RX/TX-очередей на hot-path memif-интерфейсах при `--n_workers N`;
+- поднимает VPP-сетевую топологию из memif-пар: при `--n_workers N` создается `N` inside + `N` outside интерфейсов
+  (для `n_workers=0` остается одна пара `memif10/0` + `memif20/0`);
 - применяет runtime-конфигурацию выбранного NAT-режима.
 
-После подключения TRex к memif-сокетам load-test дополнительно назначает RX-очереди hot-path memif-интерфейсов воркерам 1:1: queue `i` -> worker `i`.
+После подключения TRex к memif-сокетам load-test дополнительно назначает пары интерфейсов воркерам 1:1:
+`worker i -> inside_i(queue 0) + outside_i(queue 0)`.
 
 ### `nat_fo` режим
 
@@ -82,8 +84,9 @@ manage-nat network setup nat_fo
 
 Автоматически применяются команды:
 - `nat_fo set public-addr 10.8.0.1`
-- `nat_fo interface inside <inside-memif>`
-- `nat_fo interface outside <outside-memif>`
+- `nat_fo interface inside <inside-memif-i>` для каждой пары
+- `nat_fo interface outside <outside-memif-i>` для каждой пары
+- `nat_fo map internal <inside-host-ip-i> public <outside-ip-i>` для каждой пары
 
 `nat_fo` работает в identity-port режиме: source IP переписывается в public/external IP,
 а source port остается тем же. Для явного 1:1 соответствия можно добавлять mappings:

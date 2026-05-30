@@ -20,13 +20,14 @@ MEMIF_SHOW_COMMANDS = (
 
 THREAD_HEADER_RE = re.compile(r"^Thread\s+\d+\s+(?P<thread>\S+)")
 RUNTIME_ROW_RE = re.compile(r"^(?P<node>\S+)\s+\S+\s+(?P<calls>\d+)\s+(?P<vectors>\d+)\b")
-MEMIF_TX_NODE_RE = re.compile(r"^memif(?:10|20)/\d+-tx$")
+MEMIF_TX_NODE_RE = re.compile(r"^memif(?:1\d|2\d)/\d+-tx$")
 
 INTERFACE_RE = re.compile(r"^interface\s+(?P<ifname>\S+)$")
 RING_RE = re.compile(r"^(?P<direction>master-to-slave|slave-to-master)\s+ring\s+(?P<ring>\d+):$")
 RING_SIZE_RE = re.compile(r"\bring-size\s+(?P<value>\d+)\b")
 HEAD_TAIL_RE = re.compile(r"\bhead\s+(?P<head>\d+)\s+tail\s+(?P<tail>\d+)\b")
-TARGET_IFACE_RE = re.compile(r"^memif(?:10|20)/\d+$")
+TARGET_IFACE_RE = re.compile(r"^memif(?:1\d|2\d)/\d+$")
+MEMIF_IFACE_RE = re.compile(r"^memif(?P<socket_id>\d+)/(?P<interface_id>\d+)$")
 
 TSV_COLUMNS = (
     "timestamp_iso",
@@ -37,6 +38,11 @@ TSV_COLUMNS = (
     "calls",
     "vectors",
     "interface",
+    "iface_role",
+    "pair_index",
+    "worker_index",
+    "socket_id",
+    "interface_id",
     "ring_direction",
     "ring_index",
     "ring_size",
@@ -44,6 +50,48 @@ TSV_COLUMNS = (
     "tail",
     "error",
 )
+
+
+def interface_meta(interface: str | None) -> dict[str, Any]:
+    if interface is None:
+        return {
+            "iface_role": "",
+            "pair_index": "",
+            "worker_index": "",
+            "socket_id": "",
+            "interface_id": "",
+        }
+
+    match = MEMIF_IFACE_RE.match(interface)
+    if match is None:
+        return {
+            "iface_role": "",
+            "pair_index": "",
+            "worker_index": "",
+            "socket_id": "",
+            "interface_id": "",
+        }
+
+    socket_id = int(match.group("socket_id"))
+    interface_id = int(match.group("interface_id"))
+    iface_role = ""
+    pair_index: int | str = ""
+
+    if 10 <= socket_id <= 19:
+        iface_role = "inside"
+        pair_index = socket_id - 10
+    elif 20 <= socket_id <= 29:
+        iface_role = "outside"
+        pair_index = socket_id - 20
+
+    worker_index: int | str = pair_index if isinstance(pair_index, int) else ""
+    return {
+        "iface_role": iface_role,
+        "pair_index": pair_index,
+        "worker_index": worker_index,
+        "socket_id": socket_id,
+        "interface_id": interface_id,
+    }
 
 
 def utc_now_iso() -> str:
@@ -106,12 +154,16 @@ def parse_runtime_rows(output: str) -> list[dict[str, Any]]:
         if node != "memif-input" and MEMIF_TX_NODE_RE.match(node) is None:
             continue
 
+        interface = node.removesuffix("-tx") if node.endswith("-tx") else None
+        meta = interface_meta(interface)
         rows.append(
             {
                 "thread": current_thread,
                 "node": node,
                 "calls": int(row_match.group("calls")),
                 "vectors": int(row_match.group("vectors")),
+                "interface": interface or "",
+                **meta,
             }
         )
 
@@ -140,8 +192,10 @@ def parse_memif_rows(output: str) -> list[dict[str, Any]]:
 
         ring_match = RING_RE.match(line)
         if ring_match:
+            meta = interface_meta(current_interface)
             current_row = {
                 "interface": current_interface,
+                **meta,
                 "ring_direction": ring_match.group("direction"),
                 "ring_index": int(ring_match.group("ring")),
                 "ring_size": None,
@@ -204,6 +258,12 @@ def write_sample(writer: csv.DictWriter, timestamp_iso: str, timestamp_epoch: fl
                 "node": row["node"],
                 "calls": row["calls"],
                 "vectors": row["vectors"],
+                "interface": row["interface"],
+                "iface_role": row["iface_role"],
+                "pair_index": row["pair_index"],
+                "worker_index": row["worker_index"],
+                "socket_id": row["socket_id"],
+                "interface_id": row["interface_id"],
             }
         )
         row_count += 1
@@ -215,6 +275,11 @@ def write_sample(writer: csv.DictWriter, timestamp_iso: str, timestamp_epoch: fl
                 "timestamp_epoch": f"{timestamp_epoch:.6f}",
                 "source": "memif",
                 "interface": row["interface"],
+                "iface_role": row["iface_role"],
+                "pair_index": row["pair_index"],
+                "worker_index": row["worker_index"],
+                "socket_id": row["socket_id"],
+                "interface_id": row["interface_id"],
                 "ring_direction": row["ring_direction"],
                 "ring_index": row["ring_index"],
                 "ring_size": row["ring_size"],

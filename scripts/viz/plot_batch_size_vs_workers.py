@@ -18,12 +18,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from build_steps_stats import (  # noqa: E402
-    MEMIF_INTERFACES,
     all_workers,
     load_metrics_rows,
-    queue_indices,
+    memif_interfaces,
+    parse_int,
     runtime_deltas_by_worker,
-    worker_for_queue,
+    worker_for_index,
+    worker_index_for_interface,
 )
 
 
@@ -47,7 +48,9 @@ class BatchPoint:
     flow_count: int
     packet_size: int
     direction: str
+    iface_role: str
     interface: str
+    pair_index: int
     queue_id: int
     worker: str
     batch_size: float
@@ -230,22 +233,38 @@ def collect_batch_points(selected_steps: list[SelectedStep]) -> list[BatchPoint]
 
         workers = all_workers(step_rows)
         rx_deltas = runtime_deltas_by_worker(step_rows, "memif-input")
+        interfaces = memif_interfaces(step_rows)
         tx_deltas_by_interface = {
-            interface: runtime_deltas_by_worker(step_rows, f"{interface}/0-tx") for interface in MEMIF_INTERFACES
+            interface: runtime_deltas_by_worker(step_rows, f"{interface}-tx") for interface in interfaces
         }
 
-        for interface in MEMIF_INTERFACES:
-            for queue_id in queue_indices(step_rows, f"{interface}/"):
-                worker = worker_for_queue(workers, queue_id)
-                if worker is None:
-                    continue
+        for interface in interfaces:
+            worker_index = worker_index_for_interface(step_rows, interface)
+            worker = worker_for_index(workers, worker_index)
+            if worker is None:
+                continue
 
-                add_point(points, selected, "rx", interface, queue_id, worker, rx_deltas.get(worker))
+            pair_index = pair_index_for_interface(step_rows, interface)
+            iface_role = iface_role_for_interface(step_rows, interface)
+            for queue_id in queue_ids_for_interface(step_rows, interface):
+                add_point(
+                    points,
+                    selected,
+                    "rx",
+                    iface_role,
+                    interface,
+                    pair_index,
+                    queue_id,
+                    worker,
+                    rx_deltas.get(worker),
+                )
                 add_point(
                     points,
                     selected,
                     "tx",
+                    iface_role,
                     interface,
+                    pair_index,
                     queue_id,
                     worker,
                     tx_deltas_by_interface[interface].get(worker),
@@ -253,7 +272,15 @@ def collect_batch_points(selected_steps: list[SelectedStep]) -> list[BatchPoint]
 
     return sorted(
         points,
-        key=lambda item: (item.n_workers, item.direction, item.interface, item.queue_id, item.nat_mode),
+        key=lambda item: (
+            item.n_workers,
+            item.direction,
+            item.iface_role,
+            item.pair_index,
+            item.interface,
+            item.queue_id,
+            item.nat_mode,
+        ),
     )
 
 
@@ -261,7 +288,9 @@ def add_point(
     points: list[BatchPoint],
     selected: SelectedStep,
     direction: str,
+    iface_role: str,
     interface: str,
+    pair_index: int,
     queue_id: int,
     worker: str,
     deltas: tuple[int, int] | None,
@@ -280,7 +309,9 @@ def add_point(
             flow_count=selected.row.flow_count,
             packet_size=selected.row.packet_size,
             direction=direction,
+            iface_role=iface_role,
             interface=interface,
+            pair_index=pair_index,
             queue_id=queue_id,
             worker=worker,
             batch_size=vectors / calls,
@@ -296,6 +327,41 @@ def add_point(
     )
 
 
+def queue_ids_for_interface(rows: list[dict[str, Any]], interface: str) -> list[int]:
+    queue_ids = {
+        queue_id
+        for row in rows
+        if row.get("source") == "memif"
+        and (row.get("interface") or "") == interface
+        and (queue_id := parse_int(row.get("ring_index"))) is not None
+    }
+    return sorted(queue_ids)
+
+
+def pair_index_for_interface(rows: list[dict[str, Any]], interface: str) -> int:
+    for row in rows:
+        if row.get("source") != "memif":
+            continue
+        if (row.get("interface") or "") != interface:
+            continue
+        pair_index = parse_int(row.get("pair_index"))
+        if pair_index is not None:
+            return pair_index
+    return -1
+
+
+def iface_role_for_interface(rows: list[dict[str, Any]], interface: str) -> str:
+    for row in rows:
+        if row.get("source") != "memif":
+            continue
+        if (row.get("interface") or "") != interface:
+            continue
+        role = (row.get("iface_role") or "").strip().lower()
+        if role:
+            return role
+    return "unknown"
+
+
 def write_tsv(output: Path, points: list[BatchPoint]) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as stream:
@@ -307,7 +373,9 @@ def write_tsv(output: Path, points: list[BatchPoint]) -> None:
                 "flow_count",
                 "packet_size",
                 "direction",
+                "iface_role",
                 "interface",
+                "pair_index",
                 "queue_id",
                 "worker",
                 "batch_size",
@@ -329,7 +397,9 @@ def write_tsv(output: Path, points: list[BatchPoint]) -> None:
                     point.flow_count,
                     point.packet_size,
                     point.direction,
+                    point.iface_role,
                     point.interface,
+                    point.pair_index,
                     point.queue_id,
                     point.worker,
                     format_float(point.batch_size),
@@ -346,24 +416,24 @@ def write_tsv(output: Path, points: list[BatchPoint]) -> None:
 
 
 def queue_jitter(point: BatchPoint) -> float:
-    interface_offset = {"memif10": -0.055, "memif20": 0.055}.get(point.interface, 0.0)
-    if point.n_workers <= 1:
-        queue_offset = 0.0
-    else:
-        queue_offset = ((point.queue_id / (point.n_workers - 1)) - 0.5) * 0.07
-    return interface_offset + queue_offset
+    role_offset = {"inside": -0.055, "outside": 0.055}.get(point.iface_role, 0.0)
+    pair_offset = ((point.pair_index % 8) - 3.5) * 0.012 if point.pair_index >= 0 else 0.0
+    queue_offset = ((point.queue_id % 8) - 3.5) * 0.003
+    return role_offset + pair_offset + queue_offset
 
 
 def plot_points(output: Path, points: list[BatchPoint], title: str, yscale: str) -> None:
     import matplotlib.pyplot as plt
 
-    interface_colors = {
-        "memif10": "#4e79a7",
-        "memif20": "#f28e2b",
+    role_colors = {
+        "inside": "#4e79a7",
+        "outside": "#f28e2b",
+        "unknown": "#999999",
     }
-    interface_markers = {
-        "memif10": "o",
-        "memif20": "s",
+    role_markers = {
+        "inside": "o",
+        "outside": "s",
+        "unknown": "x",
     }
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 6), sharey=True)
@@ -371,8 +441,8 @@ def plot_points(output: Path, points: list[BatchPoint], title: str, yscale: str)
 
     for ax, direction in zip(axes, ("rx", "tx"), strict=True):
         direction_points = [point for point in points if point.direction == direction]
-        for interface in MEMIF_INTERFACES:
-            series = [point for point in direction_points if point.interface == interface]
+        for iface_role in ("inside", "outside", "unknown"):
+            series = [point for point in direction_points if point.iface_role == iface_role]
             if not series:
                 continue
             xs = [point.n_workers + queue_jitter(point) for point in series]
@@ -381,15 +451,16 @@ def plot_points(output: Path, points: list[BatchPoint], title: str, yscale: str)
                 xs,
                 ys,
                 s=64,
-                marker=interface_markers.get(interface, "o"),
-                color=interface_colors.get(interface),
+                marker=role_markers.get(iface_role, "o"),
+                color=role_colors.get(iface_role),
                 edgecolors="white",
                 linewidths=0.7,
                 alpha=0.88,
-                label=interface,
+                label=iface_role,
             )
             for x_value, y_value, point in zip(xs, ys, series, strict=True):
-                ax.text(x_value + 0.012, y_value, f"q{point.queue_id}", fontsize=7, alpha=0.72)
+                pair_label = f"p{point.pair_index}" if point.pair_index >= 0 else "p?"
+                ax.text(x_value + 0.012, y_value, pair_label, fontsize=7, alpha=0.72)
 
         ax.set_title(direction.upper())
         ax.set_xlabel("n_workers")

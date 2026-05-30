@@ -21,6 +21,8 @@ NAT44_MAX_SESSIONS = 10000
 NAT_FO_PUBLIC_ADDR = "10.8.0.1"
 NAT_INSIDE_IP_CIDR = "10.8.1.1/24"
 NAT_OUTSIDE_IP_CIDR = "10.8.0.1/24"
+NAT_INSIDE_SUBNET_PREFIX = "10.8.1"
+NAT_OUTSIDE_SUBNET_PREFIX = "10.8.0"
 UNKNOWN_INPUT_RE = re.compile(r"unknown input|unknown command|parse error", re.IGNORECASE)
 NAT_PLUGIN_LINE_RE = re.compile(r"^\s*plugin\s+nat_plugin\.so\s+\{.*\}\s*$")
 NAT_FO_PLUGIN_LINE_RE = re.compile(r"^\s*plugin\s+nat_fo_plugin\.so\s+\{.*\}\s*$")
@@ -34,6 +36,10 @@ VPP_READY_POLL_INTERVAL_SECONDS = 1
 VPP_MAIN_CORE = 7
 VPP_WORKER_CORE_START = 8
 VPP_MAX_WORKERS = 7
+INSIDE_MEMIF_SOCKET_ID_BASE = 10
+OUTSIDE_MEMIF_SOCKET_ID_BASE = 20
+PAIR_HOST_STRIDE = 4
+PAIR_SUBNET_PREFIX_LEN = 30
 
 
 @dataclass(frozen=True)
@@ -52,19 +58,86 @@ class MemifEndpoint:
 
 
 MEMIF_INSIDE_A = MemifEndpoint(
-    socket_id=10,
+    socket_id=INSIDE_MEMIF_SOCKET_ID_BASE,
     interface_id=0,
     socket_path="/run/vpp/memif-inside-a.sock",
     role="master",
 )
 MEMIF_OUTSIDE = MemifEndpoint(
-    socket_id=20,
+    socket_id=OUTSIDE_MEMIF_SOCKET_ID_BASE,
     interface_id=0,
     socket_path="/run/vpp/memif-outside.sock",
     role="master",
 )
-MULTIQUEUE_MEMIF_ENDPOINTS = (MEMIF_INSIDE_A, MEMIF_OUTSIDE)
 STALE_MEMIF_SOCKET_PATHS = ("/run/vpp/memif-inside-b.sock",)
+
+
+def memif_pair_count_for_workers(n_workers: int) -> int:
+    """Возвращает число inside/outside memif-пар для текущей конфигурации workers."""
+    return max(1, n_workers)
+
+
+def pair_host_base(pair_index: int) -> int:
+    """Возвращает базовый host-octet для пары (inside/outside)."""
+    if pair_index < 0:
+        raise ValueError("pair_index must be non-negative")
+    return 1 + pair_index * PAIR_HOST_STRIDE
+
+
+def inside_ip_cidr_for_pair(pair_index: int) -> str:
+    """Возвращает inside IP/CIDR для memif-пары."""
+    return f"{NAT_INSIDE_SUBNET_PREFIX}.{pair_host_base(pair_index)}/{PAIR_SUBNET_PREFIX_LEN}"
+
+
+def outside_ip_cidr_for_pair(pair_index: int) -> str:
+    """Возвращает outside IP/CIDR для memif-пары."""
+    return f"{NAT_OUTSIDE_SUBNET_PREFIX}.{pair_host_base(pair_index)}/{PAIR_SUBNET_PREFIX_LEN}"
+
+
+def inside_host_ip_for_pair(pair_index: int) -> str:
+    """Возвращает TRex inside host IP для memif-пары."""
+    return f"{NAT_INSIDE_SUBNET_PREFIX}.{pair_host_base(pair_index) + 1}"
+
+
+def outside_host_ip_for_pair(pair_index: int) -> str:
+    """Возвращает TRex outside host IP для memif-пары."""
+    return f"{NAT_OUTSIDE_SUBNET_PREFIX}.{pair_host_base(pair_index) + 1}"
+
+
+def memif_inside_endpoint_for_pair(pair_index: int) -> MemifEndpoint:
+    """Возвращает inside memif endpoint для указанной пары."""
+    if pair_index == 0:
+        return MEMIF_INSIDE_A
+    return MemifEndpoint(
+        socket_id=INSIDE_MEMIF_SOCKET_ID_BASE + pair_index,
+        interface_id=0,
+        socket_path=f"/run/vpp/memif-inside-{pair_index}.sock",
+        role="master",
+    )
+
+
+def memif_outside_endpoint_for_pair(pair_index: int) -> MemifEndpoint:
+    """Возвращает outside memif endpoint для указанной пары."""
+    if pair_index == 0:
+        return MEMIF_OUTSIDE
+    return MemifEndpoint(
+        socket_id=OUTSIDE_MEMIF_SOCKET_ID_BASE + pair_index,
+        interface_id=0,
+        socket_path=f"/run/vpp/memif-outside-{pair_index}.sock",
+        role="master",
+    )
+
+
+def memif_pairs_for_workers(n_workers: int) -> tuple[tuple[MemifEndpoint, MemifEndpoint], ...]:
+    """Строит список inside/outside memif-пар для текущего количества workers."""
+    pair_count = memif_pair_count_for_workers(n_workers)
+    return tuple(
+        (
+            memif_inside_endpoint_for_pair(pair_index),
+            memif_outside_endpoint_for_pair(pair_index),
+        )
+        for pair_index in range(pair_count)
+    )
 
 
 def run_vppctl_command(command: str, description: str) -> str:
@@ -332,8 +405,7 @@ def wait_for_vpp_ready(timeout_seconds: int) -> None:
 
 def memif_queue_count_for_endpoint(endpoint: MemifEndpoint, n_workers: int) -> int:
     """Возвращает количество RX/TX-очередей для memif-интерфейса."""
-    if endpoint in MULTIQUEUE_MEMIF_ENDPOINTS:
-        return max(1, n_workers)
+    del endpoint, n_workers
     return 1
 
 
@@ -363,71 +435,75 @@ def configure_memif_rx_placement(n_workers: int) -> None:
         click.echo("  ✓ RX placement memif-очередей пропущен (worker threads disabled)")
         return
 
-    for queue_index in range(n_workers):
-        for endpoint in MULTIQUEUE_MEMIF_ENDPOINTS:
+    pairs = memif_pairs_for_workers(n_workers)
+    if len(pairs) < n_workers:
+        raise RuntimeError(f"Insufficient memif pairs for workers: pairs={len(pairs)}, workers={n_workers}")
+
+    for worker_index in range(n_workers):
+        inside_endpoint, outside_endpoint = pairs[worker_index]
+        for endpoint in (inside_endpoint, outside_endpoint):
             run_vppctl_command(
-                (
-                    f"set interface rx-placement {endpoint.interface_name} "
-                    f"queue {queue_index} worker {queue_index}"
-                ),
-                (
-                    f"RX queue {queue_index} интерфейса {endpoint.interface_name} "
-                    f"назначена worker {queue_index}"
-                ),
+                f"set interface rx-placement {endpoint.interface_name} queue 0 worker {worker_index}",
+                f"RX queue 0 интерфейса {endpoint.interface_name} назначена worker {worker_index}",
             )
 
 
 def remove_stale_memif_sockets() -> None:
     """Удаляет старые memif-сокеты перед пересозданием интерфейсов."""
-    for endpoint in (MEMIF_INSIDE_A, MEMIF_OUTSIDE):
-        run_command(with_privileges(["rm", "-f", endpoint.socket_path]))
+    for pair_index in range(memif_pair_count_for_workers(VPP_MAX_WORKERS)):
+        inside_endpoint = memif_inside_endpoint_for_pair(pair_index)
+        outside_endpoint = memif_outside_endpoint_for_pair(pair_index)
+        for endpoint in (inside_endpoint, outside_endpoint):
+            run_command(with_privileges(["rm", "-f", endpoint.socket_path]))
     for socket_path in STALE_MEMIF_SOCKET_PATHS:
         run_command(with_privileges(["rm", "-f", socket_path]))
 
 
-def configure_l3_interfaces() -> None:
+def configure_l3_interfaces(n_workers: int) -> None:
     """Назначает IP-адреса напрямую inside/outside memif-интерфейсам."""
-    run_vppctl_command(
-        f"set interface ip address {MEMIF_INSIDE_A.interface_name} {NAT_INSIDE_IP_CIDR}",
-        f"Inside memif получил IP {NAT_INSIDE_IP_CIDR}",
-    )
-    run_vppctl_command(
-        f"set interface ip address {MEMIF_OUTSIDE.interface_name} {NAT_OUTSIDE_IP_CIDR}",
-        f"Outside memif получил IP {NAT_OUTSIDE_IP_CIDR}",
-    )
+    for pair_index, (inside_endpoint, outside_endpoint) in enumerate(memif_pairs_for_workers(n_workers)):
+        inside_ip_cidr = inside_ip_cidr_for_pair(pair_index)
+        outside_ip_cidr = outside_ip_cidr_for_pair(pair_index)
+        run_vppctl_command(
+            f"set interface ip address {inside_endpoint.interface_name} {inside_ip_cidr}",
+            f"Inside memif {inside_endpoint.interface_name} получил IP {inside_ip_cidr}",
+        )
+        run_vppctl_command(
+            f"set interface ip address {outside_endpoint.interface_name} {outside_ip_cidr}",
+            f"Outside memif {outside_endpoint.interface_name} получил IP {outside_ip_cidr}",
+        )
 
 
-def set_interfaces_up() -> None:
+def set_interfaces_up(n_workers: int) -> None:
     """Поднимает все интерфейсы стенда."""
-    interfaces = [
-        MEMIF_INSIDE_A.interface_name,
-        MEMIF_OUTSIDE.interface_name,
-    ]
+    interfaces: list[str] = []
+    for inside_endpoint, outside_endpoint in memif_pairs_for_workers(n_workers):
+        interfaces.extend((inside_endpoint.interface_name, outside_endpoint.interface_name))
     for iface in interfaces:
         run_vppctl_command(f"set interface state {iface} up", f"Поднят интерфейс {iface}")
 
 
-def configure_nat_runtime_mode(nat_mode: str) -> None:
+def configure_nat_runtime_mode(nat_mode: str, n_workers: int) -> None:
     """Применяет runtime-конфигурацию NAT для already-up топологии."""
     if nat_mode == "none":
         click.echo("  ✓ NAT runtime-конфигурация пропущена (режим none)")
         return
 
-    inside_iface = MEMIF_INSIDE_A.interface_name
-    outside_iface = MEMIF_OUTSIDE.interface_name
+    pairs = memif_pairs_for_workers(n_workers)
     if nat_mode == "nat44":
         run_vppctl_command(
             f"nat44 plugin enable sessions {NAT44_MAX_SESSIONS}",
             f"NAT44 включен (sessions={NAT44_MAX_SESSIONS})",
         )
-        run_vppctl_command(
-            f"set interface nat44 in {inside_iface} out {outside_iface}",
-            "Назначены NAT44 роли inside/outside",
-        )
-        run_vppctl_command(
-            f"nat44 add interface address {outside_iface}",
-            "Внешний NAT44 адрес назначен по outside интерфейсу",
-        )
+        for inside_endpoint, outside_endpoint in pairs:
+            run_vppctl_command(
+                f"set interface nat44 in {inside_endpoint.interface_name} out {outside_endpoint.interface_name}",
+                f"NAT44 роли назначены: {inside_endpoint.interface_name} -> {outside_endpoint.interface_name}",
+            )
+            run_vppctl_command(
+                f"nat44 add interface address {outside_endpoint.interface_name}",
+                f"NAT44 внешний адрес добавлен с {outside_endpoint.interface_name}",
+            )
         run_vppctl_command("show nat44 summary", "Проверка NAT44 summary")
         return
 
@@ -435,15 +511,28 @@ def configure_nat_runtime_mode(nat_mode: str) -> None:
         f"nat_fo set public-addr {NAT_FO_PUBLIC_ADDR}",
         f"NAT_FO public-addr={NAT_FO_PUBLIC_ADDR}",
     )
-    run_vppctl_command(
-        f"nat_fo interface inside {inside_iface}",
-        "NAT_FO inside интерфейс назначен",
-    )
-    run_vppctl_command(
-        f"nat_fo interface outside {outside_iface}",
-        "NAT_FO outside интерфейс назначен",
-    )
+    for pair_index, (inside_endpoint, outside_endpoint) in enumerate(pairs):
+        run_vppctl_command(
+            f"nat_fo interface inside {inside_endpoint.interface_name}",
+            f"NAT_FO inside интерфейс назначен: {inside_endpoint.interface_name}",
+        )
+        run_vppctl_command(
+            f"nat_fo interface outside {outside_endpoint.interface_name}",
+            f"NAT_FO outside интерфейс назначен: {outside_endpoint.interface_name}",
+        )
+        run_vppctl_command(
+            f"nat_fo map internal {inside_host_ip_for_pair(pair_index)} public {cidr_ip_no_mask(outside_ip_cidr_for_pair(pair_index))}",
+            (
+                "NAT_FO mapping добавлен: "
+                f"{inside_host_ip_for_pair(pair_index)} -> {cidr_ip_no_mask(outside_ip_cidr_for_pair(pair_index))}"
+            ),
+        )
     run_vppctl_command("show nat_fo", "Проверка NAT_FO summary")
+
+
+def cidr_ip_no_mask(value: str) -> str:
+    """Возвращает IP-часть из строки вида `10.8.1.1/24`."""
+    return value.split("/", 1)[0]
 
 
 def setup_network(project_root: Path, nat_mode: str, n_workers: int = 0) -> None:
@@ -458,14 +547,15 @@ def setup_network(project_root: Path, nat_mode: str, n_workers: int = 0) -> None
     restart_vpp_service()
     remove_stale_memif_sockets()
 
-    for endpoint in (MEMIF_INSIDE_A, MEMIF_OUTSIDE):
-        create_memif_endpoint(
-            endpoint,
-            queue_count=memif_queue_count_for_endpoint(endpoint, n_workers),
-        )
+    for inside_endpoint, outside_endpoint in memif_pairs_for_workers(n_workers):
+        for endpoint in (inside_endpoint, outside_endpoint):
+            create_memif_endpoint(
+                endpoint,
+                queue_count=memif_queue_count_for_endpoint(endpoint, n_workers),
+            )
 
-    configure_l3_interfaces()
-    set_interfaces_up()
-    configure_nat_runtime_mode(mode)
+    configure_l3_interfaces(n_workers)
+    set_interfaces_up(n_workers)
+    configure_nat_runtime_mode(mode, n_workers)
 
     click.echo("✓ Сетевая топология готова")
