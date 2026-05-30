@@ -8,6 +8,7 @@ from pathlib import Path
 
 import rich_click as click
 
+from ..config import VPP_CPU_MAIN_CORE, VPP_CPU_MAX_WORKERS
 from ..helpers import run_command, with_privileges
 from ..nat_mode import (
     MANAGED_BLOCK_BEGIN,
@@ -33,9 +34,6 @@ CORELIST_WORKERS_LINE_RE = re.compile(r"^\s*corelist-workers\s+.+$")
 FAILOVER_STARTUP_CONFIG_RE = re.compile(r"^\s*(startup-config|exec)\s+.*nat_fo_topology\.vpp\s*$")
 VPP_READY_TIMEOUT_SECONDS = 25
 VPP_READY_POLL_INTERVAL_SECONDS = 1
-VPP_MAIN_CORE = 7
-VPP_WORKER_CORE_START = 8
-VPP_MAX_WORKERS = 7
 INSIDE_MEMIF_SOCKET_ID_BASE = 10
 OUTSIDE_MEMIF_SOCKET_ID_BASE = 20
 PAIR_HOST_STRIDE = 4
@@ -274,11 +272,12 @@ def find_section_end(lines: list[str], section_start: int) -> int:
 
 def configure_vpp_workers(n_workers: int) -> None:
     """Устанавливает `cpu`-параметры VPP в startup.conf."""
-    if n_workers < 0 or n_workers > VPP_MAX_WORKERS:
-        raise ValueError(f"n_workers must be in range 0..{VPP_MAX_WORKERS}")
+    if n_workers < 0 or n_workers > VPP_CPU_MAX_WORKERS:
+        raise ValueError(f"n_workers must be in range 0..{VPP_CPU_MAX_WORKERS}")
 
+    worker_core_start = VPP_CPU_MAIN_CORE + 1
     corelist_workers = (
-        f"{VPP_WORKER_CORE_START}-{VPP_WORKER_CORE_START + n_workers - 1}"
+        f"{worker_core_start}-{worker_core_start + n_workers - 1}"
         if n_workers > 0
         else None
     )
@@ -300,7 +299,7 @@ def configure_vpp_workers(n_workers: int) -> None:
             and not MAIN_CORE_LINE_RE.match(line)
             and not CORELIST_WORKERS_LINE_RE.match(line)
         ]
-        cleaned_body.append(f"  main-core {VPP_MAIN_CORE}")
+        cleaned_body.append(f"  main-core {VPP_CPU_MAIN_CORE}")
         if corelist_workers is not None:
             cleaned_body.append(f"  corelist-workers {corelist_workers}")
         lines = lines[: cpu_start + 1] + cleaned_body + lines[cpu_end:]
@@ -311,7 +310,7 @@ def configure_vpp_workers(n_workers: int) -> None:
             [
                 "",
                 "cpu {",
-                f"  main-core {VPP_MAIN_CORE}",
+                f"  main-core {VPP_CPU_MAIN_CORE}",
                 *([f"  corelist-workers {corelist_workers}"] if corelist_workers is not None else []),
                 "}",
                 "",
@@ -321,7 +320,7 @@ def configure_vpp_workers(n_workers: int) -> None:
     write_startup_conf("\n".join(lines))
     click.echo(
         "  ✓ startup.conf обновлен: "
-        f"main-core={VPP_MAIN_CORE}, "
+        f"main-core={VPP_CPU_MAIN_CORE}, "
         f"corelist-workers={corelist_workers if corelist_workers is not None else 'disabled'}"
     )
 
@@ -450,7 +449,7 @@ def configure_memif_rx_placement(n_workers: int) -> None:
 
 def remove_stale_memif_sockets() -> None:
     """Удаляет старые memif-сокеты перед пересозданием интерфейсов."""
-    for pair_index in range(memif_pair_count_for_workers(VPP_MAX_WORKERS)):
+    for pair_index in range(memif_pair_count_for_workers(VPP_CPU_MAX_WORKERS)):
         inside_endpoint = memif_inside_endpoint_for_pair(pair_index)
         outside_endpoint = memif_outside_endpoint_for_pair(pair_index)
         for endpoint in (inside_endpoint, outside_endpoint):

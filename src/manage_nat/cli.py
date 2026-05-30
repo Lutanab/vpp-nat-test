@@ -4,6 +4,7 @@ from pathlib import Path
 
 import rich_click as click
 
+from .config import VPP_CPU_MAIN_CORE, VPP_CPU_MAX_WORKERS
 from .nat_mode import (
     STARTUP_CONF_PATH,
     VALID_NAT_MODES,
@@ -70,10 +71,13 @@ def network_group() -> None:
 @click.option(
     "--n_workers",
     "--n-workers",
-    type=click.IntRange(min=0, max=7),
+    type=click.IntRange(min=0, max=VPP_CPU_MAX_WORKERS),
     default=0,
     show_default=True,
-    help="Количество VPP worker thread(s), 0..7 (corelist-workers от 8-го ядра).",
+    help=(
+        f"Количество VPP worker thread(s), 0..{VPP_CPU_MAX_WORKERS} "
+        f"(main-core={VPP_CPU_MAIN_CORE}, workers с {VPP_CPU_MAIN_CORE + 1})."
+    ),
 )
 @click.option(
     "--project-root",
@@ -105,10 +109,13 @@ def network_clean_command(project_root: Path) -> None:
 @click.option(
     "--n_workers",
     "--n-workers",
-    type=click.IntRange(min=0, max=7),
+    type=click.IntRange(min=0, max=VPP_CPU_MAX_WORKERS),
     default=0,
     show_default=True,
-    help="Количество VPP worker thread(s), 0..7 (corelist-workers от 8-го ядра).",
+    help=(
+        f"Количество VPP worker thread(s), 0..{VPP_CPU_MAX_WORKERS} "
+        f"(main-core={VPP_CPU_MAIN_CORE}, workers с {VPP_CPU_MAIN_CORE + 1})."
+    ),
 )
 @click.option(
     "--project-root",
