@@ -8,7 +8,7 @@ from pathlib import Path
 
 import rich_click as click
 
-from ..config import VPP_CPU_MAIN_CORE, VPP_CPU_MAX_WORKERS
+from ..config import MEMIF_RING_SIZE_DEFAULT, VPP_CPU_MAIN_CORE, VPP_CPU_MAX_WORKERS
 from ..helpers import run_command, with_privileges
 from ..nat_mode import (
     MANAGED_BLOCK_BEGIN,
@@ -425,10 +425,12 @@ def memif_queue_count_for_endpoint(endpoint: MemifEndpoint, n_workers: int) -> i
     return 1
 
 
-def create_memif_endpoint(endpoint: MemifEndpoint, queue_count: int) -> None:
+def create_memif_endpoint(endpoint: MemifEndpoint, queue_count: int, ring_size: int) -> None:
     """Создаёт memif-сокет и memif-интерфейс в VPP."""
     if queue_count < 1:
         raise ValueError("memif queue_count must be positive")
+    if ring_size < 1:
+        raise ValueError("memif ring_size must be positive")
 
     run_vppctl_command(
         f"create memif socket id {endpoint.socket_id} filename {endpoint.socket_path}",
@@ -438,9 +440,10 @@ def create_memif_endpoint(endpoint: MemifEndpoint, queue_count: int) -> None:
         (
             "create interface memif "
             f"id {endpoint.interface_id} socket-id {endpoint.socket_id} {endpoint.role}"
+            f" ring-size {ring_size}"
             f" rx-queues {queue_count} tx-queues {queue_count}"
         ),
-        f"Создан memif интерфейс {endpoint.interface_name} (queues={queue_count})",
+        f"Создан memif интерфейс {endpoint.interface_name} (queues={queue_count}, ring-size={ring_size})",
     )
     run_command(with_privileges(["chmod", "666", endpoint.socket_path]))
 
@@ -549,11 +552,21 @@ def cidr_ip_no_mask(value: str) -> str:
     return value.split("/", 1)[0]
 
 
-def setup_network(project_root: Path, nat_mode: str, n_workers: int = 0) -> None:
+def setup_network(
+    project_root: Path,
+    nat_mode: str,
+    n_workers: int = 0,
+    memif_ring_size: int = MEMIF_RING_SIZE_DEFAULT,
+) -> None:
     """Поднимает VPP runtime-топологию inside/outside memif и применяет NAT-режим."""
     del project_root  # API-совместимость с другими workflow-функциями.
     mode = ensure_valid_nat_mode(nat_mode)
-    click.echo(f"=== Подготовка сети (nat-mode={mode}, n_workers={n_workers}) ===")
+    if memif_ring_size < 1:
+        raise ValueError("memif_ring_size must be positive")
+    click.echo(
+        "=== Подготовка сети "
+        f"(nat-mode={mode}, n_workers={n_workers}, memif_ring_size={memif_ring_size}) ==="
+    )
 
     disable_failover_startup_topology()
     configure_vpp_nat_plugins_for_mode(mode)
@@ -566,6 +579,7 @@ def setup_network(project_root: Path, nat_mode: str, n_workers: int = 0) -> None
             create_memif_endpoint(
                 endpoint,
                 queue_count=memif_queue_count_for_endpoint(endpoint, n_workers),
+                ring_size=memif_ring_size,
             )
 
     configure_l3_interfaces()

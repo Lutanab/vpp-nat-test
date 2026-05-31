@@ -20,3 +20,7 @@ TREX_CONSOLE_LINK_PATH = Path("/usr/local/bin") / TREX_CONSOLE_BINARY_NAME
 # ============================================================================
 VPP_CPU_MAIN_CORE = 320
 VPP_CPU_MAX_WORKERS = 20
+
+
+# memif ring-size for `create interface memif ... ring-size <size> ...`
+MEMIF_RING_SIZE_DEFAULT = 16384

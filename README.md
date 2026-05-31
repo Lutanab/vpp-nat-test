@@ -57,7 +57,7 @@ sudo systemctl restart vpp
 Команда принимает обязательный аргумент NAT-режима:
 
 ```bash
-manage-nat network setup <none|nat44|nat_fo> [--n_workers N]
+manage-nat network setup <none|nat44|nat_fo> [--n_workers N] [--memif-ring-size SIZE]
 ```
 
 Поддерживаются режимы:
@@ -70,6 +70,7 @@ manage-nat network setup <none|nat44|nat_fo> [--n_workers N]
 - обновляет `cpu`-параметры VPP в `/etc/vpp/startup.conf` (`main-core` и `corelist-workers` через `--n_workers`);
 - перезапускает VPP;
 - поднимает фиксированную VPP-сетевую топологию из 8 memif-пар (`8` inside + `8` outside интерфейсов);
+- создает memif-интерфейсы с `ring-size` (по умолчанию `1024`, можно переопределить через `--memif-ring-size`);
 - в dataplane/NAT используются только первые `N` пар (по `--n_workers N`; для `n_workers=0` используется первая пара);
 - применяет runtime-конфигурацию выбранного NAT-режима.
 
@@ -80,6 +81,8 @@ manage-nat network setup <none|nat44|nat_fo> [--n_workers N]
 
 ```bash
 manage-nat network setup nat_fo
+# или с кастомным размером кольца:
+manage-nat network setup nat_fo --memif-ring-size 2048
 ```
 
 Автоматически применяются команды:
@@ -183,7 +186,7 @@ manage-nat network setup none
 manage-nat network clean
 
 # 2) Поднять сеть с нужным NAT-режимом
-manage-nat network setup <none|nat44|nat_fo>
+manage-nat network setup <none|nat44|nat_fo> [--memif-ring-size SIZE]
 ```
 
 ### Автоматическое переключение NAT через CLI
@@ -204,6 +207,8 @@ manage-nat show
 
 ```bash
 manage-nat switch <none|nat44|nat_fo>
+# с переопределением ring-size:
+manage-nat switch <none|nat44|nat_fo> --memif-ring-size 2048
 ```
 
 Если режим уже записан в `startup.conf`, но нужно принудительно пересобрать `nat_fo`
@@ -211,6 +216,8 @@ manage-nat switch <none|nat44|nat_fo>
 
 ```bash
 manage-nat switch --restart nat_fo
+# или с явным ring-size:
+manage-nat switch --restart nat_fo --memif-ring-size 2048
 ```
 
 CLI выполняет шаги по порядку:
@@ -244,3 +251,34 @@ sudo vppctl show threads
 ```bash
 sudo grep -nE "^[[:space:]]*cpu[[:space:]]*\\{|^[[:space:]]*main-core|^[[:space:]]*corelist-workers" /etc/vpp/startup.conf
 ```
+
+## Замер CPU time воркеров VPP
+
+Скрипт `record_worker_cpu.py` пишет сырые счетчики процессорного времени для `vpp_wk_*`:
+
+- читает `n_workers` из load config (или из `--n-workers`);
+- проверяет, что существуют все `vpp_wk_0..vpp_wk_(N-1)`, иначе завершаетcя с ошибкой;
+- проверяет affinity воркеров относительно `VPP_CPU_MAIN_CORE` (`worker i` должен включать `main_core + 1 + i`);
+- поллит каждые `35ms` по умолчанию и пишет `worker_cpu_raw.tsv`.
+
+Пример ручного запуска (в отдельном терминале):
+
+```bash
+python3 record_worker_cpu.py
+```
+
+Параллельно запускается прогон:
+
+```bash
+test-nat load-run
+```
+
+После завершения прогона остановите поллер (`Ctrl+C`) и соберите per-step таблицу:
+
+```bash
+python3 build_worker_cpu_steps.py
+```
+
+Результат: `worker_cpu_steps.tsv` в каталоге результатов.  
+Ключевые колонки: `step_index`, `target_pps`, `wall_time_sec`, `cpu_time_sec`,
+`avg_used_cores`, `avg_worker_utilization_percent`.

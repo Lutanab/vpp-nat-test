@@ -4,7 +4,7 @@ from pathlib import Path
 
 import rich_click as click
 
-from .config import VPP_CPU_MAIN_CORE, VPP_CPU_MAX_WORKERS
+from .config import MEMIF_RING_SIZE_DEFAULT, VPP_CPU_MAIN_CORE, VPP_CPU_MAX_WORKERS
 from .nat_mode import (
     STARTUP_CONF_PATH,
     VALID_NAT_MODES,
@@ -86,9 +86,21 @@ def network_group() -> None:
     show_default=False,
     help="Корень репозитория.",
 )
-def network_setup_command(nat_mode: str, n_workers: int, project_root: Path) -> None:
+@click.option(
+    "--memif-ring-size",
+    type=click.IntRange(min=1),
+    default=MEMIF_RING_SIZE_DEFAULT,
+    show_default=True,
+    help="Размер memif-кольца (`ring-size`) для создаваемых интерфейсов.",
+)
+def network_setup_command(nat_mode: str, n_workers: int, project_root: Path, memif_ring_size: int) -> None:
     """Поднимает сеть и применяет выбранный NAT-режим."""
-    setup_network(project_root=project_root, nat_mode=nat_mode, n_workers=n_workers)
+    setup_network(
+        project_root=project_root,
+        nat_mode=nat_mode,
+        n_workers=n_workers,
+        memif_ring_size=memif_ring_size,
+    )
 
 
 @network_group.command("clean")
@@ -129,11 +141,25 @@ def network_clean_command(project_root: Path) -> None:
     is_flag=True,
     help="Force the full stop/clean/rebuild/setup/start workflow even if the requested NAT mode is already configured.",
 )
-def switch_command(nat_mode: str, n_workers: int, project_root: Path, restart: bool) -> None:
+@click.option(
+    "--memif-ring-size",
+    type=click.IntRange(min=1),
+    default=MEMIF_RING_SIZE_DEFAULT,
+    show_default=True,
+    help="Размер memif-кольца (`ring-size`) для создаваемых интерфейсов.",
+)
+def switch_command(
+    nat_mode: str,
+    n_workers: int,
+    project_root: Path,
+    restart: bool,
+    memif_ring_size: int,
+) -> None:
     """Переключает NAT-режим полным stop/clean/setup/start workflow."""
     switch_nat_mode(
         nat_mode=nat_mode,
         n_workers=n_workers,
         project_root=project_root,
         restart=restart,
+        memif_ring_size=memif_ring_size,
     )
