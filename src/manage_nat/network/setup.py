@@ -8,7 +8,7 @@ from pathlib import Path
 
 import rich_click as click
 
-from ..config import MEMIF_RING_SIZE_DEFAULT, VPP_CPU_MAIN_CORE, VPP_CPU_MAX_WORKERS
+from ..config import MEMIF_RING_SIZE_DEFAULT, VPP_CPU_MAIN_CORE, VPP_CPU_MAX_WORKERS, VPP_FIXED_MEMIF_PAIRS
 from ..helpers import run_command, with_privileges
 from ..nat_mode import (
     MANAGED_BLOCK_BEGIN,
@@ -36,7 +36,6 @@ VPP_READY_TIMEOUT_SECONDS = 25
 VPP_READY_POLL_INTERVAL_SECONDS = 1
 INSIDE_MEMIF_SOCKET_ID_BASE = 10
 OUTSIDE_MEMIF_SOCKET_ID_BASE = 20
-FIXED_MEMIF_PAIR_COUNT = 8
 PAIR_HOST_STRIDE = 4
 PAIR_SUBNET_PREFIX_LEN = 30
 
@@ -73,12 +72,16 @@ STALE_MEMIF_SOCKET_PATHS = ("/run/vpp/memif-inside-b.sock",)
 
 def memif_pair_count_for_workers(n_workers: int) -> int:
     """Возвращает число inside/outside memif-пар для текущей конфигурации workers."""
+    if n_workers > memif_topology_pair_count():
+        raise ValueError(
+            f"n_workers={n_workers} exceeds fixed memif pair count={memif_topology_pair_count()}"
+        )
     return max(1, n_workers)
 
 
 def memif_topology_pair_count() -> int:
     """Возвращает фиксированное число memif-пар в runtime-топологии."""
-    return FIXED_MEMIF_PAIR_COUNT
+    return VPP_FIXED_MEMIF_PAIRS
 
 
 def pair_host_base(pair_index: int) -> int:

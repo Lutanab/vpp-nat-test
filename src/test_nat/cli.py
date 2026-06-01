@@ -5,8 +5,9 @@ from pathlib import Path
 
 import rich_click as click
 
-from .config import load_test_configs
+from .config import load_latency_test_configs, load_test_configs
 from .failover.run import run_failover_profile, run_failover_simple
+from .latency_runner import run_latency_test
 from .load_runner import LoadSearchError, run_load_test
 from .trex.run.simple import CapturedTcpPacket, SimpleTcpTestResult, run_simple_tcp_test
 from .trex.run.udp import run_udp_test
@@ -117,6 +118,32 @@ def run_load_command(
         )
     except LoadSearchError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@run_group.command("latency")
+@click.option(
+    "--load-config",
+    "--config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Path to latency load YAML config. Defaults to configs/loadtest/latency/load/test_config.yaml.",
+)
+@click.option(
+    "--search-config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Path to latency search YAML config. Defaults to configs/loadtest/latency/search/test_config.yaml.",
+)
+def run_latency_command(
+    load_config: Path | None,
+    search_config: Path | None,
+) -> None:
+    """Run single-shot TRex latency test under fixed load."""
+    resolved_config, search, load_config_path, search_config_path = load_latency_test_configs(load_config, search_config)
+    run_latency_test(
+        resolved_config,
+        search,
+        load_config_path,
+        search_config_path,
+    )
 
 
 @run_group.group("failover")

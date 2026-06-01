@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import math
 import sys
 import time
@@ -25,6 +26,7 @@ CLIENT_PORT = 0
 SERVER_PORT = 1
 UDP_PG_ID = 10
 UDP_REVERSE_PG_ID = 20
+UDP_LATENCY_PG_ID_BASE = 1000
 UDP_PACKET_SIZE_BYTES = 64
 UDP_SRC_PORT = 12345
 UDP_DST_PORT = 5001
@@ -49,6 +51,80 @@ class UdpRunResult:
     loss_percent: float
     actual_sent_pps: float
     trex_queue_counters: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class UdpLatencyPairResult:
+    pair_index: int
+    inside_port_id: int
+    outside_port_id: int
+    inside_ip: str
+    outside_ip: str
+    flow_count: int
+    load_target_pps: int
+    latency_target_pps: int
+    load_pg_id: int
+    latency_pg_id: int
+    load_expected_packets: int
+    load_tx_packets: int
+    load_rx_packets: int
+    load_lost_packets: int
+    load_loss_rate: float
+    load_actual_sent_pps: float
+    latency_tx_packets: int
+    latency_rx_packets: int
+    latency_sample_count: int
+    latency_average_usec: float | None
+    latency_jitter_usec: float | None
+    latency_total_min_usec: int | None
+    latency_total_max_usec: int | None
+    latency_last_max_usec: int | None
+    latency_p50_usec: int | None
+    latency_p95_usec: int | None
+    latency_p99_usec: int | None
+    latency_percentile_source: str
+    latency_histogram: dict[int, int]
+    latency_err_cntrs: dict[str, int]
+
+
+@dataclass(frozen=True)
+class UdpLatencySummary:
+    sample_count: int
+    average_usec: float | None
+    jitter_usec: float | None
+    total_min_usec: int | None
+    total_max_usec: int | None
+    last_max_usec: int | None
+    p50_usec: int | None
+    p95_usec: int | None
+    p99_usec: int | None
+    percentile_source: str
+    histogram: dict[int, int]
+    err_cntrs: dict[str, int]
+
+
+@dataclass(frozen=True)
+class UdpLatencyRunResult:
+    target_pps: int
+    duration_sec: float
+    warmup_sec: float
+    packet_size: int
+    flow_count: int
+    pair_count: int
+    measurement_start_epoch: float
+    measurement_end_epoch: float
+    total_load_expected_packets: int
+    total_load_tx_packets: int
+    total_load_rx_packets: int
+    total_load_lost_packets: int
+    total_load_loss_rate: float
+    total_load_loss_percent: float
+    total_load_actual_sent_pps: float
+    total_latency_tx_packets: int
+    total_latency_rx_packets: int
+    total_latency_samples: int
+    summary: UdpLatencySummary
+    pairs: tuple[UdpLatencyPairResult, ...]
 
 
 def load_trex_stl_api() -> Any:
@@ -159,6 +235,54 @@ def build_udp_stream(
         mode=api.STLTXCont(pps=target_pps),
         flow_stats=api.STLFlowStats(pg_id=pg_id),
         core_id=core_id,
+    )
+
+
+def build_udp_latency_stream(
+    api: Any,
+    target_pps: int,
+    packet_size: int = UDP_PACKET_SIZE_BYTES,
+    flow_count: int = 1,
+    src_ip: str = TREX_INSIDE_A_IP,
+    dst_ip: str = TREX_OUTSIDE_IP,
+    udp_sport_start: int | None = None,
+    pg_id: int = UDP_LATENCY_PG_ID_BASE,
+    name: str = "udp_latency_inside_a_to_outside",
+) -> Any:
+    """Собирает continuous UDP stream с latency статистикой."""
+    default_sport = UDP_SRC_PORT if flow_count == 1 else UDP_SPORT_RANGE_START
+    sport_min = default_sport if udp_sport_start is None else udp_sport_start
+    sport_max = sport_min + flow_count - 1
+    if flow_count > 1 and sport_max > UDP_SPORT_RANGE_END:
+        raise ValueError(f"UDP source port range exceeds {UDP_SPORT_RANGE_END}")
+
+    base_packet = (
+        api.Ether()
+        / api.IP(src=src_ip, dst=dst_ip)
+        / api.UDP(sport=sport_min, dport=UDP_DST_PORT, chksum=0)
+    )
+    padding_size = max(0, packet_size - len(base_packet))
+    packet = base_packet / (b"x" * padding_size)
+
+    vm = None
+    if flow_count > 1:
+        vm = [
+            api.STLVmFlowVar(
+                name="udp_sport",
+                min_value=sport_min,
+                max_value=sport_max,
+                size=2,
+                op="inc",
+                split_to_cores=False,
+            ),
+            api.STLVmWrFlowVar(fv_name="udp_sport", pkt_offset="UDP.sport"),
+        ]
+
+    return api.STLStream(
+        name=name,
+        packet=api.STLPktBuilder(pkt=packet, vm=vm),
+        mode=api.STLTXCont(pps=target_pps),
+        flow_stats=api.STLFlowLatencyStats(pg_id=pg_id),
     )
 
 
@@ -357,6 +481,252 @@ def extract_total_counter(flow_stats: dict[str, Any], counter_name: str) -> int:
     return sum(int(value) for value in counter.values() if isinstance(value, (int, float)))
 
 
+def normalize_latency_histogram(raw_histogram: Any) -> dict[int, int]:
+    """Нормализует latency histogram в формат `{bucket_upper_usec: packet_count}`."""
+    if raw_histogram is None:
+        return {}
+    if isinstance(raw_histogram, dict):
+        normalized: dict[int, int] = {}
+        for raw_key, raw_value in raw_histogram.items():
+            try:
+                bucket = int(raw_key)
+                count = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                normalized[bucket] = normalized.get(bucket, 0) + count
+        return normalized
+    if isinstance(raw_histogram, list):
+        normalized = {}
+        for item in raw_histogram:
+            if not isinstance(item, dict):
+                continue
+            try:
+                bucket = int(item.get("key"))
+                count = int(item.get("val", 0))
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                normalized[bucket] = normalized.get(bucket, 0) + count
+        return normalized
+    return {}
+
+
+def merge_latency_histograms(histograms: list[dict[int, int]]) -> dict[int, int]:
+    """Объединяет несколько latency histogram в один."""
+    merged: dict[int, int] = {}
+    for histogram in histograms:
+        for bucket_upper_usec, count in histogram.items():
+            merged[bucket_upper_usec] = merged.get(bucket_upper_usec, 0) + count
+    return dict(sorted(merged.items()))
+
+
+def latency_bucket_upper_usec(bucket_start_usec: int) -> int:
+    """Возвращает верхнюю границу bucket-а latency histogram (usec)."""
+    if bucket_start_usec <= 0:
+        return 10
+    return bucket_start_usec + int(pow(10, len(str(bucket_start_usec)) - 1))
+
+
+def calculate_histogram_percentile(histogram: dict[int, int], percentile: float) -> int | None:
+    """Вычисляет percentile по latency histogram (верхняя граница bucket-а)."""
+    if not histogram:
+        return None
+    if percentile <= 0 or percentile > 100:
+        raise ValueError("percentile must be in range (0, 100]")
+
+    total_samples = sum(histogram.values())
+    if total_samples <= 0:
+        return None
+    threshold = math.ceil((percentile / 100) * total_samples)
+    running = 0
+    for bucket_start_usec in sorted(histogram):
+        running += histogram[bucket_start_usec]
+        if running >= threshold:
+            return latency_bucket_upper_usec(bucket_start_usec)
+    return latency_bucket_upper_usec(max(histogram))
+
+
+def normalize_hdrh_payload(raw_hdrh: Any) -> Any:
+    """Нормализует hdrh payload в dict/list, если это возможно."""
+    if raw_hdrh is None:
+        return None
+    if isinstance(raw_hdrh, (dict, list)):
+        return raw_hdrh
+    if isinstance(raw_hdrh, str):
+        text = raw_hdrh.strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def extract_hdrh_percentiles_usec(raw_hdrh: Any) -> dict[int, int]:
+    """Пытается извлечь p50/p95/p99 (usec) из hdrh payload."""
+    payload = normalize_hdrh_payload(raw_hdrh)
+    if payload is None:
+        return {}
+
+    parsed = _extract_percentile_value_pairs(payload)
+    if not parsed:
+        return {}
+
+    result: dict[int, int] = {}
+    for percentile in (50, 95, 99):
+        value = _pick_percentile(parsed, percentile)
+        if value is not None:
+            result[percentile] = int(round(value))
+    return result
+
+
+def _extract_percentile_value_pairs(payload: Any) -> dict[float, float]:
+    """Возвращает map `{percentile: latency_usec}` из произвольного hdrh payload."""
+    result: dict[float, float] = {}
+    if isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            p = _as_float_or_none(item.get("percentile"))
+            if p is None:
+                p = _as_float_or_none(item.get("perc"))
+            if p is None:
+                p = _as_float_or_none(item.get("key"))
+            value = _as_float_or_none(item.get("value"))
+            if value is None:
+                value = _as_float_or_none(item.get("val"))
+            if p is None or value is None:
+                continue
+            normalized_p = _normalize_percentile_key(p)
+            if normalized_p is not None:
+                result[normalized_p] = value
+        return result
+
+    if not isinstance(payload, dict):
+        return result
+
+    for key in ("percentiles", "values", "data", "stats"):
+        nested = payload.get(key)
+        if nested is not None:
+            result.update(_extract_percentile_value_pairs(nested))
+
+    for key in ("p50", "p95", "p99"):
+        value = _as_float_or_none(payload.get(key))
+        if value is not None:
+            normalized_p = float(key[1:])
+            result[normalized_p] = value
+
+    numeric_map_found = False
+    for raw_p, raw_value in payload.items():
+        p = _as_float_or_none(raw_p)
+        value = _as_float_or_none(raw_value)
+        if p is None or value is None:
+            continue
+        normalized_p = _normalize_percentile_key(p)
+        if normalized_p is None:
+            continue
+        result[normalized_p] = value
+        numeric_map_found = True
+
+    if numeric_map_found:
+        return result
+    return result
+
+
+def _normalize_percentile_key(raw_percentile: float) -> float | None:
+    if raw_percentile <= 0:
+        return None
+    if raw_percentile <= 1:
+        return raw_percentile * 100
+    if raw_percentile <= 100:
+        return raw_percentile
+    return None
+
+
+def _pick_percentile(percentile_map: dict[float, float], target: float) -> float | None:
+    if not percentile_map:
+        return None
+    for key, value in percentile_map.items():
+        if abs(key - target) < 1e-9:
+            return value
+    candidate_keys = sorted(percentile_map)
+    lower = [key for key in candidate_keys if key <= target]
+    upper = [key for key in candidate_keys if key >= target]
+    if lower and upper:
+        lo = lower[-1]
+        hi = upper[0]
+        if lo == hi:
+            return percentile_map[lo]
+        lo_val = percentile_map[lo]
+        hi_val = percentile_map[hi]
+        ratio = (target - lo) / (hi - lo)
+        return lo_val + (hi_val - lo_val) * ratio
+    if lower:
+        return percentile_map[lower[-1]]
+    if upper:
+        return percentile_map[upper[0]]
+    return None
+
+
+def extract_latency_stats_by_pg_id(client: Any, pg_ids: tuple[int, ...]) -> dict[int, dict[str, Any]]:
+    """Считывает latency stats по каждому latency PG ID."""
+    pgid_stats = client.get_pgid_stats(pgid_list=list(pg_ids))
+    latency_by_id = pgid_stats.get("latency", {})
+    flow_stats_by_id = pgid_stats.get("flow_stats", {})
+
+    stats_by_pg_id: dict[int, dict[str, Any]] = {}
+    for pg_id in pg_ids:
+        latency_entry = latency_by_id.get(pg_id) or latency_by_id.get(str(pg_id))
+        if latency_entry is None:
+            raise RuntimeError(f"TRex did not return latency stats for PG ID {pg_id}")
+        latency = latency_entry.get("latency", {})
+        histogram = normalize_latency_histogram(latency.get("histogram"))
+        hdrh_percentiles_usec = extract_hdrh_percentiles_usec(latency.get("hdrh"))
+        err_cntrs_raw = latency_entry.get("err_cntrs", {})
+        err_cntrs = {
+            "dropped": int(err_cntrs_raw.get("dropped", 0)),
+            "dup": int(err_cntrs_raw.get("dup", 0)),
+            "out_of_order": int(err_cntrs_raw.get("out_of_order", 0)),
+            "seq_too_high": int(err_cntrs_raw.get("seq_too_high", 0)),
+            "seq_too_low": int(err_cntrs_raw.get("seq_too_low", 0)),
+        }
+
+        flow_entry = flow_stats_by_id.get(pg_id) or flow_stats_by_id.get(str(pg_id)) or {}
+        tx_pkts = extract_total_counter(flow_entry, "tx_pkts")
+        rx_pkts = extract_total_counter(flow_entry, "rx_pkts")
+
+        stats_by_pg_id[pg_id] = {
+            "average_usec": _as_float_or_none(latency.get("average")),
+            "jitter_usec": _as_float_or_none(latency.get("jitter")),
+            "total_min_usec": _as_int_or_none(latency.get("total_min")),
+            "total_max_usec": _as_int_or_none(latency.get("total_max")),
+            "last_max_usec": _as_int_or_none(latency.get("last_max")),
+            "histogram": histogram,
+            "hdrh_percentiles_usec": hdrh_percentiles_usec,
+            "sample_count": sum(histogram.values()),
+            "err_cntrs": err_cntrs,
+            "tx_packets": tx_pkts,
+            "rx_packets": rx_pkts,
+        }
+    return stats_by_pg_id
+
+
+def _as_float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def read_udp_counters_by_pg_id(client: Any, pg_ids: tuple[int, ...]) -> dict[int, tuple[int, int]]:
     """Считывает tx/rx counters по каждому PG ID отдельно."""
     pgid_stats = client.get_pgid_stats(pgid_list=list(pg_ids))
@@ -553,6 +923,287 @@ def run_udp_measurement(
             loss_percent=loss_rate * 100,
             actual_sent_pps=tx_packets / duration,
             trex_queue_counters=tuple(trex_queue_counters),
+        )
+    finally:
+        try:
+            client.stop(ports=inside_ports)
+        except Exception:
+            pass
+        client.disconnect()
+
+
+def run_udp_latency_measurement(
+    target_pps: int,
+    duration: float,
+    packet_size: int = UDP_PACKET_SIZE_BYTES,
+    flow_count: int = 1,
+    warmup_sec: float = 0,
+) -> UdpLatencyRunResult:
+    """Запускает combined load+latency UDP тест и возвращает latency/loss артефакт."""
+    if target_pps <= 0:
+        raise ValueError("target_pps must be positive")
+    if duration <= 0:
+        raise ValueError("duration must be positive")
+    if packet_size <= 0:
+        raise ValueError("packet_size must be positive")
+    if flow_count <= 0:
+        raise ValueError("flow_count must be positive")
+    if warmup_sec < 0:
+        raise ValueError("warmup_sec must be non-negative")
+
+    api = load_trex_stl_api()
+    client = api.STLClient(server=TREX_SERVER_HOST)
+    all_port_pairs = resolve_active_port_pairs()
+    active_pairs = select_load_port_pairs(all_port_pairs, flow_count=flow_count)
+    ports: list[int] = []
+    inside_ports: list[int] = []
+    for pair in active_pairs:
+        inside_ports.append(pair.inside.port_id)
+        ports.extend((pair.inside.port_id, pair.outside.port_id))
+
+    pair_count = len(active_pairs)
+    trex_data_cores = resolve_trex_data_cores()
+    pps_by_pair = split_evenly(target_pps, pair_count)
+    flows_by_pair = [1] * pair_count if flow_count == 1 else split_evenly(flow_count, pair_count)
+
+    streams_by_port: dict[int, list[Any]] = {port: [] for port in inside_ports}
+    pair_run_plan: list[dict[str, Any]] = []
+    load_pg_ids: list[int] = []
+    latency_pg_ids: list[int] = []
+    next_sport = UDP_SPORT_RANGE_START
+    for pair_slot, (pair, pair_pps, pair_flows) in enumerate(zip(active_pairs, pps_by_pair, flows_by_pair, strict=True)):
+        load_pg_id = UDP_PG_ID + pair_slot
+        latency_pg_id = UDP_LATENCY_PG_ID_BASE + pair_slot
+        load_pg_ids.append(load_pg_id)
+        latency_pg_ids.append(latency_pg_id)
+        sport_start = None if flow_count == 1 else next_sport
+        core_id = pair_slot % trex_data_cores
+
+        streams_by_port[pair.inside.port_id].append(
+            build_udp_stream(
+                api=api,
+                target_pps=pair_pps,
+                packet_size=packet_size,
+                flow_count=pair_flows,
+                src_ip=pair.inside.ip,
+                dst_ip=pair.outside.ip,
+                udp_sport_start=sport_start,
+                pg_id=load_pg_id,
+                core_id=core_id,
+                name=f"udp_load_inside_to_outside_pair_{pair.pair_index}",
+            )
+        )
+        streams_by_port[pair.inside.port_id].append(
+            build_udp_latency_stream(
+                api=api,
+                target_pps=pair_pps,
+                packet_size=packet_size,
+                flow_count=pair_flows,
+                src_ip=pair.inside.ip,
+                dst_ip=pair.outside.ip,
+                udp_sport_start=sport_start,
+                pg_id=latency_pg_id,
+                name=f"udp_latency_inside_to_outside_pair_{pair.pair_index}",
+            )
+        )
+
+        pair_run_plan.append(
+            {
+                "pair": pair,
+                "load_pg_id": load_pg_id,
+                "latency_pg_id": latency_pg_id,
+                "target_pps": pair_pps,
+                "flow_count": pair_flows,
+            }
+        )
+        if flow_count > 1:
+            next_sport += pair_flows
+
+    try:
+        client.connect()
+        client.reset(ports=ports)
+        configure_l3_mode(client, port_pairs=active_pairs)
+        client.remove_all_streams(ports=inside_ports)
+        for port_id in inside_ports:
+            client.add_streams(streams_by_port[port_id], ports=[port_id])
+        client.clear_stats(ports=ports)
+        client.start(ports=inside_ports)
+        if warmup_sec > 0:
+            time.sleep(warmup_sec)
+            client.clear_stats(ports=ports)
+
+        measurement_start_epoch = time.time()
+        time.sleep(duration)
+        client.stop(ports=inside_ports)
+        measurement_end_epoch = time.time()
+
+        load_counters_by_pg_id = read_udp_counters_by_pg_id(client, pg_ids=tuple(load_pg_ids))
+        latency_stats_by_pg_id = extract_latency_stats_by_pg_id(client, pg_ids=tuple(latency_pg_ids))
+
+        pair_results: list[UdpLatencyPairResult] = []
+        all_histograms: list[dict[int, int]] = []
+        summary_err_cntrs = {
+            "dropped": 0,
+            "dup": 0,
+            "out_of_order": 0,
+            "seq_too_high": 0,
+            "seq_too_low": 0,
+        }
+        total_load_tx_packets = 0
+        total_load_rx_packets = 0
+        total_load_expected_packets = 0
+        total_latency_tx_packets = 0
+        total_latency_rx_packets = 0
+        total_latency_samples = 0
+        weighted_average_sum = 0.0
+        average_weight = 0
+        weighted_jitter_sum = 0.0
+        jitter_weight = 0
+        min_candidates: list[int] = []
+        max_candidates: list[int] = []
+        last_max_candidates: list[int] = []
+        pair_percentile_sources: list[str] = []
+
+        for pair_data in pair_run_plan:
+            pair = pair_data["pair"]
+            load_pg_id = pair_data["load_pg_id"]
+            latency_pg_id = pair_data["latency_pg_id"]
+            pair_target_pps = pair_data["target_pps"]
+            pair_flows = pair_data["flow_count"]
+
+            load_tx_packets, load_rx_packets = load_counters_by_pg_id[load_pg_id]
+            load_expected_packets = calculate_expected_packets(pair_target_pps, duration, load_tx_packets)
+            load_lost_packets = max(0, load_expected_packets - load_rx_packets)
+            load_loss_rate = load_lost_packets / load_expected_packets
+
+            latency_stats = latency_stats_by_pg_id[latency_pg_id]
+            latency_histogram = latency_stats["histogram"]
+            latency_sample_count = latency_stats["sample_count"]
+            latency_average_usec = latency_stats["average_usec"]
+            latency_jitter_usec = latency_stats["jitter_usec"]
+            latency_total_min_usec = latency_stats["total_min_usec"]
+            latency_total_max_usec = latency_stats["total_max_usec"]
+            latency_last_max_usec = latency_stats["last_max_usec"]
+            latency_err_cntrs = latency_stats["err_cntrs"]
+            latency_tx_packets = latency_stats["tx_packets"]
+            latency_rx_packets = latency_stats["rx_packets"]
+            hdrh_percentiles_usec = latency_stats.get("hdrh_percentiles_usec", {})
+
+            p50_usec = _as_int_or_none(hdrh_percentiles_usec.get(50))
+            p95_usec = _as_int_or_none(hdrh_percentiles_usec.get(95))
+            p99_usec = _as_int_or_none(hdrh_percentiles_usec.get(99))
+            percentile_source = "hdrh"
+            if p50_usec is None or p95_usec is None or p99_usec is None:
+                p50_usec = calculate_histogram_percentile(latency_histogram, 50)
+                p95_usec = calculate_histogram_percentile(latency_histogram, 95)
+                p99_usec = calculate_histogram_percentile(latency_histogram, 99)
+                percentile_source = "histogram"
+
+            pair_results.append(
+                UdpLatencyPairResult(
+                    pair_index=pair.pair_index,
+                    inside_port_id=pair.inside.port_id,
+                    outside_port_id=pair.outside.port_id,
+                    inside_ip=pair.inside.ip,
+                    outside_ip=pair.outside.ip,
+                    flow_count=pair_flows,
+                    load_target_pps=pair_target_pps,
+                    latency_target_pps=pair_target_pps,
+                    load_pg_id=load_pg_id,
+                    latency_pg_id=latency_pg_id,
+                    load_expected_packets=load_expected_packets,
+                    load_tx_packets=load_tx_packets,
+                    load_rx_packets=load_rx_packets,
+                    load_lost_packets=load_lost_packets,
+                    load_loss_rate=load_loss_rate,
+                    load_actual_sent_pps=load_tx_packets / duration,
+                    latency_tx_packets=latency_tx_packets,
+                    latency_rx_packets=latency_rx_packets,
+                    latency_sample_count=latency_sample_count,
+                    latency_average_usec=latency_average_usec,
+                    latency_jitter_usec=latency_jitter_usec,
+                    latency_total_min_usec=latency_total_min_usec,
+                    latency_total_max_usec=latency_total_max_usec,
+                    latency_last_max_usec=latency_last_max_usec,
+                    latency_p50_usec=p50_usec,
+                    latency_p95_usec=p95_usec,
+                    latency_p99_usec=p99_usec,
+                    latency_percentile_source=percentile_source,
+                    latency_histogram=latency_histogram,
+                    latency_err_cntrs=latency_err_cntrs,
+                )
+            )
+            pair_percentile_sources.append(percentile_source)
+
+            all_histograms.append(latency_histogram)
+            for key in summary_err_cntrs:
+                summary_err_cntrs[key] += int(latency_err_cntrs.get(key, 0))
+            total_load_tx_packets += load_tx_packets
+            total_load_rx_packets += load_rx_packets
+            total_load_expected_packets += load_expected_packets
+            total_latency_tx_packets += latency_tx_packets
+            total_latency_rx_packets += latency_rx_packets
+            total_latency_samples += latency_sample_count
+            if latency_average_usec is not None and latency_sample_count > 0:
+                weighted_average_sum += latency_average_usec * latency_sample_count
+                average_weight += latency_sample_count
+            if latency_jitter_usec is not None and latency_sample_count > 0:
+                weighted_jitter_sum += latency_jitter_usec * latency_sample_count
+                jitter_weight += latency_sample_count
+            if latency_total_min_usec is not None:
+                min_candidates.append(latency_total_min_usec)
+            if latency_total_max_usec is not None:
+                max_candidates.append(latency_total_max_usec)
+            if latency_last_max_usec is not None:
+                last_max_candidates.append(latency_last_max_usec)
+
+        total_load_lost_packets = max(0, total_load_expected_packets - total_load_rx_packets)
+        total_load_loss_rate = total_load_lost_packets / total_load_expected_packets
+        merged_histogram = merge_latency_histograms(all_histograms)
+        summary_percentile_source = "hdrh" if pair_percentile_sources and all(
+            source == "hdrh" for source in pair_percentile_sources
+        ) else "histogram"
+
+        summary = UdpLatencySummary(
+            sample_count=total_latency_samples,
+            average_usec=(
+                weighted_average_sum / average_weight
+                if average_weight > 0
+                else None
+            ),
+            jitter_usec=(weighted_jitter_sum / jitter_weight if jitter_weight > 0 else None),
+            total_min_usec=min(min_candidates) if min_candidates else None,
+            total_max_usec=max(max_candidates) if max_candidates else None,
+            last_max_usec=max(last_max_candidates) if last_max_candidates else None,
+            p50_usec=calculate_histogram_percentile(merged_histogram, 50),
+            p95_usec=calculate_histogram_percentile(merged_histogram, 95),
+            p99_usec=calculate_histogram_percentile(merged_histogram, 99),
+            percentile_source=summary_percentile_source,
+            histogram=merged_histogram,
+            err_cntrs=summary_err_cntrs,
+        )
+
+        return UdpLatencyRunResult(
+            target_pps=target_pps,
+            duration_sec=duration,
+            warmup_sec=warmup_sec,
+            packet_size=packet_size,
+            flow_count=flow_count,
+            pair_count=pair_count,
+            measurement_start_epoch=measurement_start_epoch,
+            measurement_end_epoch=measurement_end_epoch,
+            total_load_expected_packets=total_load_expected_packets,
+            total_load_tx_packets=total_load_tx_packets,
+            total_load_rx_packets=total_load_rx_packets,
+            total_load_lost_packets=total_load_lost_packets,
+            total_load_loss_rate=total_load_loss_rate,
+            total_load_loss_percent=total_load_loss_rate * 100,
+            total_load_actual_sent_pps=total_load_tx_packets / duration,
+            total_latency_tx_packets=total_latency_tx_packets,
+            total_latency_rx_packets=total_latency_rx_packets,
+            total_latency_samples=total_latency_samples,
+            summary=summary,
+            pairs=tuple(pair_results),
         )
     finally:
         try:

@@ -69,10 +69,11 @@ manage-nat network setup <none|nat44|nat_fo> [--n_workers N] [--memif-ring-size 
 - обновляет в `/etc/vpp/startup.conf` управляемый блок плагинов (`nat_plugin.so` / `nat_fo_plugin.so`);
 - обновляет `cpu`-параметры VPP в `/etc/vpp/startup.conf` (`main-core` и `corelist-workers` через `--n_workers`);
 - перезапускает VPP;
-- поднимает фиксированную VPP-сетевую топологию из 8 memif-пар (`8` inside + `8` outside интерфейсов);
+- поднимает фиксированную VPP-сетевую топологию из 6 memif-пар (`6` inside + `6` outside интерфейсов);
 - создает memif-интерфейсы с `ring-size` (по умолчанию `1024`, можно переопределить через `--memif-ring-size`);
 - в dataplane/NAT используются только первые `N` пар (по `--n_workers N`; для `n_workers=0` используется первая пара);
 - применяет runtime-конфигурацию выбранного NAT-режима.
+- `test-nat setup trex` по умолчанию деплоит TRex на все фиксированные memif-пары топологии.
 
 После подключения TRex к memif-сокетам load-test дополнительно назначает пары интерфейсов воркерам 1:1:
 `worker i -> inside_i(queue 0) + outside_i(queue 0)`.

@@ -6,11 +6,25 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from manage_nat.config import VPP_FIXED_MEMIF_PAIRS
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "loadtest" / "load" / "test_config.yaml"
 DEFAULT_LOAD_CONFIG_TEMPLATE_PATH = PROJECT_ROOT / "configs" / "loadtest" / "load" / "test_config.yaml.template"
 DEFAULT_SEARCH_CONFIG_PATH = PROJECT_ROOT / "configs" / "loadtest" / "search" / "test_config.yaml"
 DEFAULT_SEARCH_CONFIG_TEMPLATE_PATH = PROJECT_ROOT / "configs" / "loadtest" / "search" / "test_config.yaml.template"
+DEFAULT_LATENCY_LOAD_CONFIG_PATH = (
+    PROJECT_ROOT / "configs" / "loadtest" / "latency" / "load" / "test_config.yaml"
+)
+DEFAULT_LATENCY_LOAD_CONFIG_TEMPLATE_PATH = (
+    PROJECT_ROOT / "configs" / "loadtest" / "latency" / "load" / "test_config.yaml.template"
+)
+DEFAULT_LATENCY_SEARCH_CONFIG_PATH = (
+    PROJECT_ROOT / "configs" / "loadtest" / "latency" / "search" / "test_config.yaml"
+)
+DEFAULT_LATENCY_SEARCH_CONFIG_TEMPLATE_PATH = (
+    PROJECT_ROOT / "configs" / "loadtest" / "latency" / "search" / "test_config.yaml.template"
+)
 DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "results"
 DEFAULT_USER_VM_SSH_TARGET = "zero@10.8.2.11"
 DEFAULT_USER_VM_SSH_PORT = 22
@@ -27,7 +41,7 @@ DEFAULT_VPP_SERVICE_NAME = "vpp.service"
 DEFAULT_SCRAPE_INTERVAL_SEC = 1.0
 DEFAULT_TEST_NAME = "trex_nat_boundary"
 DEFAULT_FLOW_COUNT = 1
-UDP_SPORT_RANGE_START = 10000
+UDP_SPORT_RANGE_START = 1
 UDP_SPORT_RANGE_END = 65535
 VALID_NAT_MODES = ("none", "nat44", "nat_fo")
 
@@ -71,6 +85,31 @@ class HostTestConfig:
         payload = asdict(self)
         payload["results_root"] = str(self.results_root)
         return payload
+
+
+@dataclass(slots=True)
+class LatencyLoadConfig:
+    nat_mode: str
+    n_workers: int
+    target_pps: int
+    flow_count: int
+    packet_size: int
+    results_root: Path
+    test_name: str = DEFAULT_TEST_NAME
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["results_root"] = str(self.results_root)
+        return payload
+
+
+@dataclass(slots=True)
+class LatencySearchConfig:
+    warmup_sec: int
+    measurement_sec: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def load_test_configs(
@@ -127,22 +166,52 @@ def load_test_configs(
     return config, search, resolved_load_config_path, resolved_search_config_path
 
 
+def load_latency_test_configs(
+    load_config_path: Path | None,
+    search_config_path: Path | None,
+) -> tuple[LatencyLoadConfig, LatencySearchConfig, Path, Path]:
+    resolved_load_config_path = load_config_path or DEFAULT_LATENCY_LOAD_CONFIG_PATH
+    resolved_search_config_path = search_config_path or DEFAULT_LATENCY_SEARCH_CONFIG_PATH
+
+    if not resolved_load_config_path.exists():
+        raise FileNotFoundError(
+            f"Load config file not found: {resolved_load_config_path}. "
+            f"Start from template: {DEFAULT_LATENCY_LOAD_CONFIG_TEMPLATE_PATH}"
+        )
+    if not resolved_search_config_path.exists():
+        raise FileNotFoundError(
+            f"Search config file not found: {resolved_search_config_path}. "
+            f"Start from template: {DEFAULT_LATENCY_SEARCH_CONFIG_TEMPLATE_PATH}"
+        )
+
+    raw_load_config = load_simple_yaml(resolved_load_config_path)
+    raw_search_config = load_simple_yaml(resolved_search_config_path)
+
+    config = LatencyLoadConfig(
+        nat_mode=ensure_valid_nat_mode(str(require(raw_load_config, "nat_mode"))),
+        n_workers=int(raw_load_config.get("n_workers", 0)),
+        target_pps=int(require(raw_load_config, "target_pps")),
+        flow_count=int(raw_load_config.get("flow_count", DEFAULT_FLOW_COUNT)),
+        packet_size=int(require(raw_load_config, "packet_size")),
+        results_root=DEFAULT_RESULTS_ROOT,
+        test_name=str(raw_load_config.get("test_name") or DEFAULT_TEST_NAME),
+    )
+    search = LatencySearchConfig(
+        warmup_sec=int(raw_search_config.get("warmup_sec", 0)),
+        measurement_sec=int(require(raw_search_config, "measurement_sec")),
+    )
+    validate_latency_config(config, search)
+    return config, search, resolved_load_config_path, resolved_search_config_path
+
+
 def validate_config(config: HostTestConfig, search: SearchConfig) -> None:
     if config.packet_size <= 0:
         raise ValueError("packet_size must be positive")
     if config.n_workers < 0:
         raise ValueError("n_workers must be non-negative")
-    if config.n_workers > 7:
-        raise ValueError("n_workers must be <= 7")
-    if config.flow_count <= 0:
-        raise ValueError("flow_count must be positive")
-    max_supported_flow_count = UDP_SPORT_RANGE_END - UDP_SPORT_RANGE_START + 1
-    if config.flow_count > max_supported_flow_count:
-        raise ValueError(
-            "flow_count is too high for configured UDP sport range "
-            f"{UDP_SPORT_RANGE_START}-{UDP_SPORT_RANGE_END}; "
-            f"max supported flow_count is {max_supported_flow_count}"
-        )
+    if config.n_workers > VPP_FIXED_MEMIF_PAIRS:
+        raise ValueError(f"n_workers must be <= {VPP_FIXED_MEMIF_PAIRS}")
+    validate_flow_count(config.flow_count)
     if config.target_loss_rate < 0:
         raise ValueError("target_loss_rate must be non-negative")
     if config.reply_every <= 0:
@@ -161,12 +230,55 @@ def validate_config(config: HostTestConfig, search: SearchConfig) -> None:
         raise ValueError("search_relative_precision must be positive")
 
 
+def validate_latency_config(config: LatencyLoadConfig, search: LatencySearchConfig) -> None:
+    if config.packet_size <= 0:
+        raise ValueError("packet_size must be positive")
+    if config.n_workers < 0:
+        raise ValueError("n_workers must be non-negative")
+    if config.n_workers > VPP_FIXED_MEMIF_PAIRS:
+        raise ValueError(f"n_workers must be <= {VPP_FIXED_MEMIF_PAIRS}")
+    if config.target_pps <= 0:
+        raise ValueError("target_pps must be positive")
+    validate_flow_count(config.flow_count)
+    if search.warmup_sec < 0:
+        raise ValueError("warmup_sec must be non-negative")
+    if search.measurement_sec <= 0:
+        raise ValueError("measurement_sec must be positive")
+
+
+def validate_flow_count(flow_count: int) -> None:
+    if flow_count <= 0:
+        raise ValueError("flow_count must be positive")
+    max_supported_flow_count = UDP_SPORT_RANGE_END - UDP_SPORT_RANGE_START + 1
+    if flow_count > max_supported_flow_count:
+        raise ValueError(
+            "flow_count is too high for configured UDP sport range "
+            f"{UDP_SPORT_RANGE_START}-{UDP_SPORT_RANGE_END}; "
+            f"max supported flow_count is {max_supported_flow_count}"
+        )
+
+
 def build_results_dir(config: HostTestConfig) -> Path:
     segments = (
         ("test_name", config.test_name),
         ("flow_count", config.flow_count),
         ("n_workers", config.n_workers),
         ("target_loss_rate", config.target_loss_rate),
+        ("packet_size", config.packet_size),
+        ("nat_mode", config.nat_mode),
+    )
+    path = config.results_root
+    for key, value in segments:
+        path /= f"{key}_{slugify_value(value)}"
+    return path
+
+
+def build_latency_results_dir(config: LatencyLoadConfig) -> Path:
+    segments = (
+        ("test_name", config.test_name),
+        ("flow_count", config.flow_count),
+        ("n_workers", config.n_workers),
+        ("target_pps", config.target_pps),
         ("packet_size", config.packet_size),
         ("nat_mode", config.nat_mode),
     )

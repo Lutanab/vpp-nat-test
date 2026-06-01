@@ -1,6 +1,6 @@
-- port_limit: 16
+- port_limit: 10
   version: 2
-  limit_memory: 11264
+  limit_memory: 6144
   port_bandwidth_gb: 200
   interfaces:
     - "--vdev=net_memif0,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-inside-a.sock"
@@ -13,12 +13,6 @@
     - "--vdev=net_memif7,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-outside-3.sock"
     - "--vdev=net_memif8,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-inside-4.sock"
     - "--vdev=net_memif9,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-outside-4.sock"
-    - "--vdev=net_memif10,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-inside-5.sock"
-    - "--vdev=net_memif11,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-outside-5.sock"
-    - "--vdev=net_memif12,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-inside-6.sock"
-    - "--vdev=net_memif13,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-outside-6.sock"
-    - "--vdev=net_memif14,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-inside-7.sock"
-    - "--vdev=net_memif15,role=slave,id=0,socket-abstract=no,socket=/run/vpp/memif-outside-7.sock"
   port_info:
     - ip: 10.8.1.2
       default_gw: 10.8.1.1
@@ -40,15 +34,3 @@
       default_gw: 10.8.1.17
     - ip: 10.8.0.18
       default_gw: 10.8.0.17
-    - ip: 10.8.1.22
-      default_gw: 10.8.1.21
-    - ip: 10.8.0.22
-      default_gw: 10.8.0.21
-    - ip: 10.8.1.26
-      default_gw: 10.8.1.25
-    - ip: 10.8.0.26
-      default_gw: 10.8.0.25
-    - ip: 10.8.1.30
-      default_gw: 10.8.1.29
-    - ip: 10.8.0.30
-      default_gw: 10.8.0.29
