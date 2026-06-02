@@ -1,285 +1,340 @@
-## Управление проектом
+# VPP NAT Active/Standby Test VM
 
-Проект использует CLI `manage-nat` для управления NAT-режимом и сетевой топологией.
+Репозиторий содержит CLI `manage-nat` для подготовки тестового стенда с двумя VM
+и двумя VPP-инстансами:
 
-### Доступные команды `manage-nat`:
+- `user_vm` - внутренняя VM;
+- `external_vm` - внешняя VM;
+- `vpp.service` - primary VPP;
+- `vpp-secondary.service` - secondary VPP.
 
-- `prepare` - Подготовка окружения (зависимости VPP и системные пакеты).
-- `network setup <none|nat44|nat_fo>` - Подготовка runtime-сети VPP и применение NAT-режима.
-- `network clean` - Очистка runtime-сетевой топологии.
-- `show` - Показать NAT-режим из managed-блока `/etc/vpp/startup.conf`.
-- `switch <none|nat44|nat_fo>` - Полный сценарий переключения NAT-режима.
+В текущей схеме `setup-vms` поднимает VM и их vhost-user сокеты, `setup-vpp`
+поднимает два VPP-инстанса, а подключение VPP к VM vhost-user сокетам делает
+внешний агент.
 
-### Примеры использования:
-
-```bash
-# 1. Подготовка окружения (один раз при установке)
-manage-nat prepare
-
-# 2. Подготовка сетевой топологии VPP (обязательно указать NAT режим)
-manage-nat network setup none
-# или:
-manage-nat network setup nat44
-manage-nat network setup nat_fo
-
-# 3. Очистка сетевой конфигурации
-manage-nat network clean
-
-# Справка по manage-nat
-manage-nat --help
-```
-
-## Базовая установка vpp
-
-Перед тем как собирать:
-```bash
-manage-nat prepare
-```
-
-Очередной раз собрать:
-```bash
-cd vpp
-rm -f build-root/*.deb
-sudo make pkg-deb-debug
-sudo dpkg -i build-root/*.deb
-sudo systemctl restart vpp
-cd ..
-```
-
-Если перетер конфиги (напр startup.conf):
-```bash
-sudo cp ./configs/startu.conf /etc/vpp/startup.conf
-sudo systemctl restart vpp
-```
-
-## NAT режимы в `manage-nat network setup`
-
-Команда принимает обязательный аргумент NAT-режима:
-
-```bash
-manage-nat network setup <none|nat44|nat_fo> [--n_workers N] [--memif-ring-size SIZE]
-```
-
-Поддерживаются режимы:
-- `none` — NAT в VPP не используется;
-- `nat44` — используется дефолтный VPP NAT44;
-- `nat_fo` — используется кастомный плагин `nat_fo`.
-
-Что делает команда автоматически:
-- обновляет в `/etc/vpp/startup.conf` управляемый блок плагинов (`nat_plugin.so` / `nat_fo_plugin.so`);
-- обновляет `cpu`-параметры VPP в `/etc/vpp/startup.conf` (`main-core` и `corelist-workers` через `--n_workers`);
-- перезапускает VPP;
-- поднимает фиксированную VPP-сетевую топологию из 6 memif-пар (`6` inside + `6` outside интерфейсов);
-- создает memif-интерфейсы с `ring-size` (по умолчанию `1024`, можно переопределить через `--memif-ring-size`);
-- в dataplane/NAT используются только первые `N` пар (по `--n_workers N`; для `n_workers=0` используется первая пара);
-- применяет runtime-конфигурацию выбранного NAT-режима.
-- `test-nat setup trex` по умолчанию деплоит TRex на все фиксированные memif-пары топологии.
-
-После подключения TRex к memif-сокетам load-test дополнительно назначает пары интерфейсов воркерам 1:1:
-`worker i -> inside_i(queue 0) + outside_i(queue 0)`.
-
-### `nat_fo` режим
-
-```bash
-manage-nat network setup nat_fo
-# или с кастомным размером кольца:
-manage-nat network setup nat_fo --memif-ring-size 2048
-```
-
-Автоматически применяются команды:
-- `nat_fo set public-addr 10.8.0.1`
-- `nat_fo interface inside <inside-memif-i>` для каждой пары
-- `nat_fo interface outside <outside-memif-i>` для каждой пары
-- `nat_fo map internal <inside-host-ip-i> public <outside-ip-i>` для каждой пары
-
-`nat_fo` работает в identity-port режиме: source IP переписывается в public/external IP,
-а source port остается тем же. Для явного 1:1 соответствия можно добавлять mappings:
-
-```bash
-sudo vppctl nat_fo map internal 10.8.1.2 public 10.8.0.1
-```
-
-Если mapping для internal IP не найден, используется fallback `nat_fo set public-addr`.
-
-Проверка:
-
-```bash
-sudo vppctl show nat_fo
-```
-
-#### CLI `nat_fo` (быстрый справочник)
-
-```bash
-# Общий статус плагина (public addr, identity-port mode, mappings, live/total сессии)
-sudo vppctl show nat_fo
-
-# Добавить/обновить 1:1 mapping internal -> public/external IP
-sudo vppctl nat_fo map internal 10.8.1.2 public 10.8.0.1
-
-# Удалить mapping для internal IP
-sudo vppctl nat_fo map internal 10.8.1.2 disable
-
-# Очистить все текущие NAT-сессии
-sudo vppctl nat_fo clear sessions
-
-# Очистить runtime-сессии и durable session store в shmem
-sudo vppctl nat_fo shm clear
-
-# Полностью пересоздать shm-сегмент для чистого теста recovery
-sudo vppctl nat_fo shm unlink
-
-# Проверить, что плагин загружен
-sudo vppctl show plugins | grep nat_fo
-```
-
-Что важно: в текущей реализации `nat_fo` CLI показывает агрегированную статистику (`live/total`),  
-отдельной команды для детального списка каждой сессии пока нет.
-
-`show nat_fo` теперь также показывает состояние `shmem`: путь сегмента, число слотов,
-а также сколько сессий было восстановлено и сколько было отброшено как протухшие
-при последнем recovery после старта VPP.
-
-Если при `manage-nat network setup nat_fo` видно `unknown input 'nat_fo ...'`, это означает, что в системном VPP нет `nat_fo_plugin.so` (или он не загрузился после рестарта).  
-Проверьте и переустановите пакеты VPP из этого репозитория:
-
-```bash
-ls /usr/lib/x86_64-linux-gnu/vpp_plugins/nat_fo_plugin.so
-
-cd vpp
-sudo make pkg-deb-debug
-sudo dpkg -i build-root/*.deb
-sudo systemctl restart vpp
-sudo vppctl show plugins | grep nat_fo
-```
-
-### `nat44` режим
-
-```bash
-manage-nat network setup nat44
-```
-
-Автоматически применяются команды:
-- `nat44 plugin enable sessions 10000`
-- `set interface nat44 in <inside-memif> out <outside-memif>`
-- `nat44 add interface address <outside-memif>`
-
-Проверка:
-
-```bash
-sudo vppctl show nat44 summary
-sudo vppctl show nat44 interfaces
-```
-
-### `none` режим
-
-```bash
-manage-nat network setup none
-```
-
-В этом режиме NAT-плагины выключаются в managed-блоке `startup.conf`, и runtime NAT-конфигурация не применяется.
-
-### Смена NAT-режима (рекомендуемый сценарий)
-
-При переключении режима NAT лучше выполнять полный цикл пересоздания топологии:
-
-```bash
-# 1) Очистить сеть (остановка VPP + удаление старых интерфейсов)
-manage-nat network clean
-
-# 2) Поднять сеть с нужным NAT-режимом
-manage-nat network setup <none|nat44|nat_fo> [--memif-ring-size SIZE]
-```
-
-### Автоматическое переключение NAT через CLI
-
-Сначала подготовьте workspace:
+## Быстрый старт
 
 ```bash
 uv sync
+
+# 1. Подготовить зависимости VPP/QEMU/libvirt.
+manage-nat prepare
+
+# 2. Поднять VM.
+manage-nat setup-vms
+
+# 3. Поднять primary/secondary VPP.
+manage-nat setup-vpp nat_fo
+
+# Можно поднять только один инстанс.
+manage-nat setup-vpp primary
+
+# 4. Посмотреть состояние стенда и vhost-user подключения.
+manage-nat show
+
+# Запустить простой сценарий restart active-ноды.
+manage-nat scenario restart
+
+# Остановить оба VPP-инстанса.
+manage-nat teardown-vpp
+
+# Или остановить только один.
+manage-nat teardown-vpp secondary
 ```
 
-Показать текущий режим:
+## Команды
+
+```bash
+manage-nat --help
+```
+
+Основные команды:
+
+- `prepare` - ставит зависимости VPP/QEMU/libvirt/cloud-init.
+- `setup-vms` - создает cloud-init seed, systemd units и запускает `user_vm`/`external_vm`.
+- `setup-vpp [none|nat44|nat_fo] [all|primary|secondary]` - запускает VPP без подключения к VM vhost-user сокетам.
+- `scenario restart` - прогоняет простой restart active-ноды.
+- `teardown-vpp [all|primary|secondary]` - останавливает VPP systemd services.
+- `show` - показывает NAT-режим, состояние primary/secondary VPP и vhost-user подключения.
+
+## VM
+
+```bash
+manage-nat setup-vms
+```
+
+Команда управляет systemd units:
+
+- `vpp-external-vm.service`
+- `vpp-user-vm.service`
+- `vpp-vm-ssh-forward.service`
+
+VM параметры:
+
+| VM | dataplane IP | management IP | SSH port | vhost-user socket |
+| --- | --- | --- | --- | --- |
+| `external_vm` | `10.8.0.2/24` | `10.8.2.10` | `8022` | `/run/vpp/vhost-external.sock` |
+| `user_vm` | `10.8.1.2/24` | `10.8.2.11` | `8122` | `/run/vpp/vhost-user.sock` |
+
+Dataplane routes are intentionally narrow:
+
+- `user_vm` routes `10.8.0.0/24` via `data0 -> 10.8.1.1`;
+- `external_vm` routes `10.8.1.0/24` via `data0 -> 10.8.0.1`;
+- default routes, including Internet access such as `8.8.8.8`, go via `mgmt0`
+  and the libvirt `virbr0` network.
+
+SSH:
+
+```bash
+ssh -p 8022 zero@<host>  # external_vm
+ssh -p 8122 zero@<host>  # user_vm
+```
+
+После первого запуска добавьте нужный ключ в каждую VM явно:
+
+```bash
+ssh-copy-id -p 8022 -i ~/.ssh/id_ed25519.pub zero@<host>  # external_vm
+ssh-copy-id -p 8122 -i ~/.ssh/id_ed25519.pub zero@<host>  # user_vm
+```
+
+Первичный пароль пользователя `zero`: `orez1234`. После этого вход должен идти
+по ключу обычной командой `ssh -p ... zero@<host>`. Если VM disk image
+пересоздавался с нуля, повторите `ssh-copy-id`.
+
+`vpp-vm-ssh-forward.service` держит `socat` listeners на `0.0.0.0:8022`
+и `0.0.0.0:8122`. Быстрая проверка с хоста:
+
+```bash
+ss -ltnp | grep -E ':8022|:8122'
+ssh -p 8022 zero@127.0.0.1
+ssh -p 8122 zero@127.0.0.1
+```
+
+Serial console:
+
+```bash
+sudo socat -,raw,echo=0 unix-connect:/run/vpp/console/vpp-external-vm.sock
+sudo socat -,raw,echo=0 unix-connect:/run/vpp/console/vpp-user-vm.sock
+```
+
+Serial boot logs:
+
+```bash
+sudo tail -n 120 /var/log/vpp/vpp-external-vm-serial.log
+sudo tail -n 120 /var/log/vpp/vpp-user-vm-serial.log
+```
+
+Vhost-user сокеты создаются VM в server-mode. До подключения VPP в логах QEMU
+может быть строка `QEMU waiting for connection`; это ожидаемое состояние.
+
+## VPP
+
+```bash
+manage-nat setup-vpp nat_fo
+```
+
+Без указания инстанса команда готовит оба VPP-инстанса. Если нужно тронуть
+только один:
+
+```bash
+manage-nat setup-vpp primary
+manage-nat setup-vpp secondary
+manage-nat setup-vpp nat_fo primary
+```
+
+Инстансы:
+
+| Role | service | startup config | CLI socket |
+| --- | --- | --- | --- |
+| primary | `vpp.service` | `/etc/vpp/startup.conf` | `/run/vpp/cli.sock` |
+| secondary | `vpp-secondary.service` | `/etc/vpp/startup-secondary.conf` | `/run/vpp-secondary/cli.sock` |
+
+`setup-vpp` не создает vhost-user интерфейсы и не подключается к VM socket paths.
+Эти интерфейсы создает `vpp-ha-ctl`; он же назначает им VPP-side IP из своей
+конфигурации.
+
+Failover-стенд по умолчанию запускает VPP с одним worker thread на инстанс.
+Это значение задано в `VPP_FAILOVER_WORKERS` и используется default-ом
+`manage-nat setup-vpp --n-workers`.
+
+Ожидаемые интерфейсы VPP после подключения `vpp-ha-ctl`:
+
+| Role | interface | IP |
+| --- | --- | --- |
+| outside | `VirtualEthernet0/0/0` | `10.8.0.1/24` |
+| inside | `VirtualEthernet0/0/1` | `10.8.1.1/24` |
+
+Primary `vppctl`:
+
+```bash
+sudo vppctl show version
+sudo vppctl -s /run/vpp/cli.sock show version
+```
+
+Secondary `vppctl`:
+
+```bash
+sudo vppctl -s /run/vpp-secondary/cli.sock show version
+```
+
+Проверить сервисы:
+
+```bash
+systemctl status vpp.service
+systemctl status vpp-secondary.service
+```
+
+Остановить оба VPP-инстанса:
+
+```bash
+manage-nat teardown-vpp
+```
+
+Остановить один инстанс:
+
+```bash
+manage-nat teardown-vpp primary
+manage-nat teardown-vpp secondary
+```
+
+Проверить vhost-user подключения:
 
 ```bash
 manage-nat show
 ```
 
-Переключить режим:
+Фрагмент `vhosts` до подключения внешним агентом:
 
-```bash
-manage-nat switch <none|nat44|nat_fo>
-# с переопределением ring-size:
-manage-nat switch <none|nat44|nat_fo> --memif-ring-size 2048
+```text
+vm           socket                        primary  secondary
+-----------  ----------------------------  -------  ---------
+external_vm  /run/vpp/vhost-external.sock  -        -
+user_vm      /run/vpp/vhost-user.sock      -        -
 ```
 
-Если режим уже записан в `startup.conf`, но нужно принудительно пересобрать `nat_fo`
-и пересоздать runtime-топологию:
+## Сценарии
 
 ```bash
-manage-nat switch --restart nat_fo
-# или с явным ring-size:
-manage-nat switch --restart nat_fo --memif-ring-size 2048
+manage-nat scenario restart
 ```
 
-CLI выполняет шаги по порядку:
-- `manage-nat network clean`
-- если выбран `nat_fo`: `cd vpp && make pkg-deb-debug`, затем `dpkg -i build-root/*.deb`
-- `manage-nat network setup <mode>`
+`restart` проверяет, что primary VPP (`vpp.service`) активен и отвечает через
+`/run/vpp/cli.sock`, затем:
 
-## Мониторинг ресурсов (VPP/TRex)
+- идемпотентно останавливает `vpp-secondary.service`;
+- идемпотентно останавливает `vpp-ha-ctld.service`;
+- останавливает только `vpp.service`;
+- ждет 3 секунды;
+- запускает `vpp.service`;
+- через 400 мс запускает `vpp-ha-ctld.service`.
 
-Найти PID процессов:
+## NAT modes
+
+`setup-vpp` принимает режим:
 
 ```bash
-pgrep -af vpp
-pgrep -af t-rex-64
+manage-nat setup-vpp none
+manage-nat setup-vpp nat44
+manage-nat setup-vpp nat_fo
 ```
 
-Смотреть их вместе в `htop`:
+Режим записывается в managed plugin block обоих startup config:
+
+- `none` - `nat_plugin.so` и `nat_fo_plugin.so` выключены;
+- `nat44` - включен стандартный VPP NAT44 plugin;
+- `nat_fo` - включен кастомный `nat_fo_plugin.so`.
+
+Проверка primary:
 
 ```bash
-htop -p <PID_VPP>,<PID_TREX>
+manage-nat show
+sudo vppctl show plugins | grep nat
 ```
 
-Проверить, на какие CPU-ядра приземлились потоки VPP:
+Пример `manage-nat show`:
+
+```text
+nat_mode=nat_fo
+primary=up
+secondary=up
+vhosts:
+vm           socket                        primary                 secondary
+-----------  ----------------------------  ----------------------  ---------
+external_vm  /run/vpp/vhost-external.sock  VirtualEthernet0/0/0 up -
+user_vm      /run/vpp/vhost-user.sock      VirtualEthernet0/0/1 up -
+```
+
+Проверка secondary:
 
 ```bash
-sudo vppctl show threads
+sudo vppctl -s /run/vpp-secondary/cli.sock show plugins | grep nat
 ```
 
-Проверить текущую `cpu`-конфигурацию в `startup.conf`:
+## Сборка VPP
+
+Если нужно пересобрать и переустановить VPP packages:
 
 ```bash
-sudo grep -nE "^[[:space:]]*cpu[[:space:]]*\\{|^[[:space:]]*main-core|^[[:space:]]*corelist-workers" /etc/vpp/startup.conf
+cd vpp
+rm -f build-root/*.deb
+sudo make pkg-deb-debug
+sudo dpkg -i build-root/*.deb
+cd ..
 ```
 
-## Замер CPU time воркеров VPP
-
-Скрипт `record_worker_cpu.py` пишет сырые счетчики процессорного времени для `vpp_wk_*`:
-
-- читает `n_workers` из load config (или из `--n-workers`);
-- проверяет, что существуют все `vpp_wk_0..vpp_wk_(N-1)`, иначе завершаетcя с ошибкой;
-- проверяет affinity воркеров относительно `VPP_CPU_MAIN_CORE` (`worker i` должен включать `main_core + 1 + i`);
-- поллит каждые `35ms` по умолчанию и пишет `worker_cpu_raw.tsv`.
-
-Пример ручного запуска (в отдельном терминале):
+После переустановки заново примените runtime configs:
 
 ```bash
-python3 record_worker_cpu.py
+manage-nat setup-vpp nat_fo
 ```
 
-Параллельно запускается прогон:
+## Диагностика
+
+Список актуальных systemd units стенда:
 
 ```bash
-test-nat load-run
+systemctl list-unit-files 'vpp*' --no-pager
 ```
 
-После завершения прогона остановите поллер (`Ctrl+C`) и соберите per-step таблицу:
+Ожидаемые units:
+
+- `vpp.service`
+- `vpp-secondary.service`
+- `vpp-external-vm.service`
+- `vpp-user-vm.service`
+- `vpp-vm-ssh-forward.service`
+- `vpp.slice`
+
+Проверить процессы:
 
 ```bash
-python3 build_worker_cpu_steps.py
+pgrep -af 'vpp|qemu-system'
 ```
 
-Результат: `worker_cpu_steps.tsv` в каталоге результатов.  
-Ключевые колонки: `step_index`, `target_pps`, `wall_time_sec`, `cpu_time_sec`,
-`avg_used_cores`, `avg_worker_utilization_percent`.
+Проверить VM management leases:
+
+```bash
+virsh net-dhcp-leases default
+```
+
+Проверить runtime sockets:
+
+```bash
+ls -l /run/vpp /run/vpp-secondary /run/vpp/console
+```
+
+Посмотреть VPP логи:
+
+```bash
+journalctl -u vpp.service -n 80 --no-pager
+journalctl -u vpp-secondary.service -n 80 --no-pager
+```
+
+Некоторые предупреждения VPP startup не являются ошибкой для текущего стенда:
+
+- `uio_pci_generic not found` - модуль нужен для PCI/UIO сценариев, не для VM vhost-user стенда;
+- `perfmon: skipping source 'intel-uncore'` - perf counters недоступны в текущей среде;
+- `vat_plugin_register: ... plugin not loaded` - optional plugin не загружен.
+
+Если `systemctl is-active vpp.service vpp-secondary.service` показывает `active`,
+а `vppctl show version` отвечает для обоих CLI sockets, VPP-инстансы запущены.

@@ -1,3 +1,0 @@
-warmup_sec: 10
-waiting_sec: 10
-poll_interval_ms: 25

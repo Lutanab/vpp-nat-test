@@ -1,6 +1,0 @@
-test_name: latency_workers_1
-nat_mode: none
-n_workers: 1
-target_pps: 100000
-flow_count: 512
-packet_size: 64

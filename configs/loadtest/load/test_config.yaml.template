@@ -1,6 +1,0 @@
-test_name: worker_scaling_workers_1
-nat_mode: none
-n_workers: 1
-flow_count: 512
-packet_size: 64
-target_loss_rate: 0.001
