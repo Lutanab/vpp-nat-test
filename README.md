@@ -32,8 +32,14 @@ manage-nat setup-vpp primary
 # 4. Посмотреть состояние стенда и vhost-user подключения.
 manage-nat show
 
+# Очистить nat_fo sessions и общий shm-сегмент.
+manage-nat clear
+
 # Запустить простой сценарий restart active-ноды.
 manage-nat scenario restart
+
+# Запустить failover primary-ноды с возвратом через 15 секунд.
+manage-nat scenario failover
 
 # Остановить оба VPP-инстанса.
 manage-nat teardown-vpp
@@ -54,6 +60,8 @@ manage-nat --help
 - `setup-vms` - создает cloud-init seed, systemd units и запускает `user_vm`/`external_vm`.
 - `setup-vpp [none|nat44|nat_fo] [all|primary|secondary]` - запускает VPP без подключения к VM vhost-user сокетам.
 - `scenario restart` - прогоняет простой restart active-ноды.
+- `scenario failover` - останавливает primary-ноду на 15 секунд и запускает ее обратно.
+- `clear` - чистит `nat_fo` sessions у живых VPP-инстансов и общий shm-сегмент.
 - `teardown-vpp [all|primary|secondary]` - останавливает VPP systemd services.
 - `show` - показывает NAT-режим, состояние primary/secondary VPP и vhost-user подключения.
 
@@ -151,7 +159,8 @@ manage-nat setup-vpp nat_fo primary
 
 `setup-vpp` не создает vhost-user интерфейсы и не подключается к VM socket paths.
 Эти интерфейсы создает `vpp-ha-ctl`; он же назначает им VPP-side IP из своей
-конфигурации.
+конфигурации и применяет минимальную `nat_fo`-конфигурацию на текущей serving
+ноде.
 
 Failover-стенд по умолчанию запускает VPP с одним worker thread на инстанс.
 Это значение задано в `VPP_FAILOVER_WORKERS` и используется default-ом
@@ -216,6 +225,7 @@ user_vm      /run/vpp/vhost-user.sock      -        -
 
 ```bash
 manage-nat scenario restart
+manage-nat scenario failover
 ```
 
 `restart` проверяет, что primary VPP (`vpp.service`) активен и отвечает через
@@ -227,6 +237,30 @@ manage-nat scenario restart
 - ждет 3 секунды;
 - запускает `vpp.service`;
 - через 400 мс запускает `vpp-ha-ctld.service`.
+
+`failover`:
+
+- останавливает `vpp.service`;
+- ждет 15 секунд;
+- запускает `vpp.service`;
+
+## UDP downtime plot
+
+После запуска UDP receiver-а на `external_vm` результаты появляются в:
+
+```text
+virtual_machines/host_mounts/external_vm/ha-test/results/
+```
+
+Построить график межприходных интервалов и вывести top-5 самых больших gap:
+
+```bash
+uv run python tools/plot_udp_downtime.py
+```
+
+Скрипт интерактивно покажет список измерений и попросит выбрать номер.
+График сохраняется в выбранную run-папку как `arrival_gaps.png`, а статистика
+по gap-ам без top-5 самых больших значений - как `arrival_gap_stats.csv`.
 
 ## NAT modes
 
@@ -277,6 +311,17 @@ sudo vppctl -s /run/vpp-secondary/cli.sock show plugins | grep nat
 ```bash
 cd vpp
 rm -f build-root/*.deb
+sudo make pkg-deb-debug
+sudo dpkg -i build-root/*.deb
+cd ..
+```
+
+или
+
+```bash
+cd vpp
+sudo rm -rf build-root/build-vpp_debug-native build-root/install-vpp_debug-native
+sudo rm -f build-root/*.deb build-root/*.changes build-root/*.buildinfo
 sudo make pkg-deb-debug
 sudo dpkg -i build-root/*.deb
 cd ..

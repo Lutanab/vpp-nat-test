@@ -1,0 +1,8 @@
+{
+  "payload_hex": "6e61745f666f5f7564705f6761705f7631",
+  "poll_interval_seconds": 0.02,
+  "start_monotonic_ns": 36217420045658,
+  "start_unix_ns": 1780504012289129713,
+  "target_ip": "10.8.0.2",
+  "target_port": 5005
+}

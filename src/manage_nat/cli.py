@@ -4,6 +4,7 @@ from pathlib import Path
 
 import rich_click as click
 
+from .clear import clear_nat
 from .config import VPP_CPU_MAX_WORKERS, VPP_FAILOVER_WORKERS
 from .nat_mode import (
     STARTUP_CONF_PATH,
@@ -17,7 +18,7 @@ from .setup_vpp import setup_vpp
 from .setup_vpp.spec import PRIMARY, SECONDARY, VPP_TARGETS
 from .setup_vpp.systemd import service_is_active
 from .show_vhosts import show_vhosts
-from .scenario import restart_scenario
+from .scenario import failover_scenario, restart_scenario
 from .teardown_vpp import teardown_vpp
 
 DEFAULT_NAT_MODE = "nat_fo"
@@ -112,6 +113,12 @@ def teardown_vpp_command(target: str) -> None:
     teardown_vpp(target=target)
 
 
+@app.command("clear")
+def clear_command() -> None:
+    """Чистит nat_fo sessions и общий shm-сегмент."""
+    clear_nat()
+
+
 @app.group("scenario")
 def scenario_group() -> None:
     """Запускает готовые тестовые сценарии."""
@@ -121,6 +128,12 @@ def scenario_group() -> None:
 def scenario_restart_command() -> None:
     """Рестартует active VPP node и затем запускает vpp-ha-ctld."""
     restart_scenario()
+
+
+@scenario_group.command("failover")
+def scenario_failover_command() -> None:
+    """Останавливает primary VPP node на 15 секунд и запускает обратно."""
+    failover_scenario()
 
 
 @app.command("show")
