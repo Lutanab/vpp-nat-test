@@ -30,6 +30,16 @@ cd /mnt/host/ha-test
 python3 udp_sender.py
 ```
 
+Чтобы перед основной нагрузкой создать UDP NAT-сессии с разных source ports:
+
+```bash
+python3 udp_sender.py --burst-sessions 10000
+```
+
+Burst растягивается по времени с фиксированной скоростью создания сессий
+`--burst-sessions-per-second`, по умолчанию 1000 сессий/сек. Source ports для
+burst-а берутся из диапазона `--burst-source-port-min..--burst-source-port-max`.
+
 Sender шлет фиксированный payload `nat_fo_udp_gap_v1` на `10.8.0.2:5005`.
 Интервал отправки задается только в скрипте константой
 `POLL_INTERVAL_SECONDS`. Sender работает до ручной остановки через Ctrl-C.

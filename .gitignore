@@ -30,3 +30,4 @@ virtual_machines/host_mounts/*/host_id_*.pub
 configs/trex/trex_cfg.yaml
 
 virtual_machines/host_mounts/external_vm/ha-test/results
+virtual_machines/host_mounts/user_vm/ha-test/results
