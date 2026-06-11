@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import math
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -171,21 +173,62 @@ def collect_points(
     return {mode: sorted(points.items()) for mode, points in series.items()}, total_files, matched_files
 
 
-def write_tsv(output: Path, points: dict[str, list[tuple[int, float]]]) -> None:
+def write_tsv(output: Path, points: dict[str, list[tuple[int, float]]]) -> bool:
+    content = render_tsv(points)
+    if output.exists() and output.read_text(encoding="utf-8") == content:
+        return False
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp_output = output.with_name(f".{output.name}.{os.getpid()}.tmp")
+    try:
+        temp_output.write_text(content, encoding="utf-8")
+        temp_output.replace(output)
+    finally:
+        temp_output.unlink(missing_ok=True)
+
+    return True
+
+
+def render_tsv(points: dict[str, list[tuple[int, float]]]) -> str:
     workers = sorted({n_workers for xy in points.values() for n_workers, _ in xy})
     values_by_mode = {mode: dict(xy) for mode, xy in points.items()}
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
-        writer.writerow(("n_workers", *NAT_MODES))
-        for n_workers in workers:
-            writer.writerow(
-                (
-                    n_workers,
-                    *(format_pps(values_by_mode[mode].get(n_workers)) for mode in NAT_MODES),
-                ),
-            )
+    stream = io.StringIO()
+    writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
+    writer.writerow(("n_workers", *NAT_MODES))
+    for n_workers in workers:
+        writer.writerow(
+            (
+                n_workers,
+                *(format_pps(values_by_mode[mode].get(n_workers)) for mode in NAT_MODES),
+            ),
+        )
+    return stream.getvalue()
+
+
+def read_tsv(input_path: Path) -> dict[str, list[tuple[int, float]]]:
+    points: dict[str, list[tuple[int, float]]] = {mode: [] for mode in NAT_MODES}
+
+    with input_path.open("r", encoding="utf-8", newline="") as stream:
+        reader = csv.DictReader(stream, delimiter="\t")
+        if reader.fieldnames is None:
+            raise ValueError(f"{input_path}: missing header")
+        missing_columns = {"n_workers", *NAT_MODES} - set(reader.fieldnames)
+        if missing_columns:
+            rendered = ", ".join(sorted(missing_columns))
+            raise ValueError(f"{input_path}: missing columns: {rendered}")
+
+        for row in reader:
+            n_workers_raw = row.get("n_workers", "").strip()
+            if not n_workers_raw:
+                continue
+            n_workers = int(n_workers_raw)
+            for mode in NAT_MODES:
+                pps_raw = row.get(mode, "").strip()
+                if pps_raw:
+                    points[mode].append((n_workers, float(pps_raw)))
+
+    return {mode: sorted(mode_points) for mode, mode_points in points.items()}
 
 
 def format_pps(value: float | None) -> str:
@@ -200,6 +243,16 @@ def infer_test_name(results_dir: Path) -> str:
         if part.startswith("test_name_"):
             return part.removeprefix("test_name_")
     return results_dir.name
+
+
+def save_figure(plt, output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp_output = output.with_name(f".{output.stem}.{os.getpid()}{output.suffix}")
+    try:
+        plt.savefig(temp_output, dpi=150)
+        temp_output.replace(output)
+    finally:
+        temp_output.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -224,15 +277,28 @@ def main() -> int:
 
     points, total_files, matched_files = collect_points(resolved_results_dir, args.pps_key, active_scope)
 
+    points_from_tsv = False
     if not any(points.values()):
-        if active_scope is None:
-            print(f"error: no valid result.json files found in {resolved_results_dir}")
-        else:
-            print(
-                "error: no valid result.json files found for current load-config scope "
-                f"in {resolved_results_dir} (scanned={total_files}, matched_scope={matched_files})"
-            )
-        return 1
+        if not tsv_output.exists():
+            if active_scope is None:
+                print(f"error: no valid result.json files found in {resolved_results_dir}")
+            else:
+                print(
+                    "error: no valid result.json files found for current load-config scope "
+                    f"in {resolved_results_dir} (scanned={total_files}, matched_scope={matched_files})"
+                )
+            return 1
+
+        try:
+            points = read_tsv(tsv_output)
+        except (OSError, ValueError) as exc:
+            print(f"error: failed to read fallback TSV {tsv_output}: {exc}")
+            return 1
+        points_from_tsv = True
+
+        if not any(points.values()):
+            print(f"error: no valid points found in fallback TSV {tsv_output}")
+            return 1
 
     plt.figure(figsize=(10, 6))
 
@@ -243,24 +309,27 @@ def main() -> int:
             continue
 
         xs = [x for x, _ in xy]
-        ys = [y for _, y in xy]
+        ys = [y / 1_000_000 for _, y in xy]
 
         plt.plot(xs, ys, marker="o", linewidth=2, label=mode, color=NAT_MODE_COLORS[mode])
 
-    title_name = scope.test_name if args.results_dir is None else infer_test_name(resolved_results_dir)
-    plt.title(f"{title_name}: PPS vs Number of Workers ({args.pps_key})")
-    plt.xlabel("n_workers")
-    plt.ylabel("pps")
+    plt.title("PPS vs number of workers")
+    plt.xlabel("number of workers")
+    plt.ylabel("Mpps")
     plt.grid(True, linestyle="--", alpha=0.5)
     plt.legend(title="nat_mode")
     plt.tight_layout()
 
-    resolved_output.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(resolved_output, dpi=150)
+    save_figure(plt, resolved_output)
     print(f"saved: {resolved_output}")
 
-    write_tsv(tsv_output, points)
-    print(f"saved: {tsv_output}")
+    if points_from_tsv:
+        print(f"used: {tsv_output}")
+    else:
+        if write_tsv(tsv_output, points):
+            print(f"saved: {tsv_output}")
+        else:
+            print(f"unchanged: {tsv_output}")
 
     return 0
 
