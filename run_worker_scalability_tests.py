@@ -122,7 +122,7 @@ def run_worker_sweep() -> None:
     for n_workers in WORKER_COUNTS:
         print(f"Запускаю load-тест: workers={n_workers}.", flush=True)
         set_config_values(LOAD_CONFIG, {"n_workers": n_workers})
-        run(["uv", "run", "test-nat", "run", "load"])
+        run(["uv", "run", "test-nat", "load"])
 
 
 def plot_pps_vs_workers() -> None:

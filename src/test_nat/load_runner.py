@@ -71,7 +71,15 @@ def run_load_test(
 
     try:
         topology_changed = ensure_nat_mode(config.nat_mode, config.n_workers, logger)
-        ensure_vpp_topology(logger)
+        try:
+            ensure_vpp_topology(logger)
+        except RuntimeError:
+            if topology_changed:
+                raise
+            logger("VPP-топология не готова при совпадающих NAT/VPP параметрах; запускаем setup-vpp")
+            setup_vpp_runtime(config.nat_mode, config.n_workers, logger)
+            topology_changed = True
+            ensure_vpp_topology(logger)
         ensure_trex_ready(topology_changed, logger)
         payload = run_boundary_search(
             config=config,
@@ -139,18 +147,23 @@ def ensure_nat_mode(target_mode: str, target_workers: int, logger: RunLogger) ->
         return False
 
     logger(
-        "Переключаем параметры NAT/VPP: "
+        "Настраиваем параметры NAT/VPP: "
         f"mode {current_mode} -> {target_mode}, "
         f"n_workers {current_workers} -> {target_workers}"
     )
+    setup_vpp_runtime(target_mode, target_workers, logger)
+    return True
+
+
+def setup_vpp_runtime(target_mode: str, target_workers: int, logger: RunLogger) -> None:
+    """Запускает `manage-nat setup-vpp` для нужного NAT/VPP runtime."""
     result = subprocess.run(
         [
             manage_nat_command(),
-            "switch",
+            "setup-vpp",
             target_mode,
             "--n_workers",
             str(target_workers),
-            "--restart",
         ],
         text=True,
         capture_output=True,
@@ -158,8 +171,7 @@ def ensure_nat_mode(target_mode: str, target_workers: int, logger: RunLogger) ->
     )
     if result.returncode != 0:
         log_failed_subprocess("manage-nat", result, logger)
-        raise RuntimeError(f"manage-nat switch failed with code {result.returncode}")
-    return True
+        raise RuntimeError(f"manage-nat setup-vpp failed with code {result.returncode}")
 
 
 def ensure_vpp_topology(logger: RunLogger) -> None:
@@ -190,7 +202,7 @@ def has_nonlocal_vpp_interface(show_interface_output: str) -> bool:
 def ensure_trex_ready(topology_changed: bool, logger: RunLogger) -> None:
     """Перезапускает TRex, если VPP-топология была пересоздана или link down."""
     if topology_changed:
-        restart_trex_server("VPP topology changed after NAT mode switch", logger)
+        restart_trex_server("VPP topology changed after setup-vpp", logger)
         return
     if not trex_links_are_up():
         restart_trex_server("TRex memif links are down", logger)

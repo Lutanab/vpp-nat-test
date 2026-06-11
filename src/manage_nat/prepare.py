@@ -16,7 +16,7 @@ from .config import (
     TREX_SERVER_BINARY_NAME,
     TREX_SERVER_LINK_PATH,
 )
-from .helpers import run_command, with_privileges
+from .helpers import PROJECT_ROOT, run_command, with_privileges
 
 APT_PACKAGES = (
     "socat",
@@ -27,9 +27,9 @@ APT_PACKAGES = (
 TREX_INSECURE_DOWNLOAD_ENV = "VPP_NAT_TEST_TREX_INSECURE_DOWNLOAD"
 
 
-def ensure_vpp_directory(project_root: Path) -> Path:
+def ensure_vpp_directory() -> Path:
     """Проверяет, что директория `vpp/` существует."""
-    vpp_dir = project_root / "vpp"
+    vpp_dir = PROJECT_ROOT / "vpp"
     if not vpp_dir.is_dir():
         raise FileNotFoundError(f"VPP directory not found: {vpp_dir}")
     return vpp_dir
@@ -164,10 +164,10 @@ def prepare_trex() -> None:
     )
 
 
-def run_prepare(project_root: Path) -> None:
+def run_prepare() -> None:
     """Готовит окружение для NAT-тестового стенда."""
     click.echo("=== Подготовка окружения ===")
-    vpp_dir = ensure_vpp_directory(project_root)
+    vpp_dir = ensure_vpp_directory()
     install_vpp_dependencies(vpp_dir)
     install_apt_dependencies()
     prepare_trex()

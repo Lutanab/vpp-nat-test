@@ -4,7 +4,6 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import rich_click as click
 
@@ -31,7 +30,6 @@ CPU_SECTION_LINE_RE = re.compile(r"^\s*cpu\s*\{\s*$")
 WORKERS_LINE_RE = re.compile(r"^\s*workers\s+\d+\s*$")
 MAIN_CORE_LINE_RE = re.compile(r"^\s*main-core\s+\d+\s*$")
 CORELIST_WORKERS_LINE_RE = re.compile(r"^\s*corelist-workers\s+.+$")
-FAILOVER_STARTUP_CONFIG_RE = re.compile(r"^\s*(startup-config|exec)\s+.*nat_fo_topology\.vpp\s*$")
 VPP_READY_TIMEOUT_SECONDS = 25
 VPP_READY_POLL_INTERVAL_SECONDS = 1
 INSIDE_MEMIF_SOCKET_ID_BASE = 10
@@ -236,16 +234,6 @@ def remove_nat_plugin_lines(lines: list[str]) -> list[str]:
             continue
         result.append(line)
     return result
-
-
-def disable_failover_startup_topology() -> None:
-    """Отключает failover startup topology, чтобы normal setup не конфликтовал с runtime CLI."""
-    lines = read_startup_conf().splitlines()
-    cleaned = [line for line in lines if not FAILOVER_STARTUP_CONFIG_RE.match(line)]
-    if cleaned == lines:
-        return
-    write_startup_conf("\n".join(cleaned))
-    click.echo("  ✓ failover startup topology отключена для normal network setup")
 
 
 def configure_vpp_nat_plugins_for_mode(nat_mode: str) -> None:
@@ -553,22 +541,19 @@ def cidr_ip_no_mask(value: str) -> str:
 
 
 def setup_network(
-    project_root: Path,
     nat_mode: str,
     n_workers: int = 0,
     memif_ring_size: int = MEMIF_RING_SIZE_DEFAULT,
 ) -> None:
     """Поднимает VPP runtime-топологию inside/outside memif и применяет NAT-режим."""
-    del project_root  # API-совместимость с другими workflow-функциями.
     mode = ensure_valid_nat_mode(nat_mode)
     if memif_ring_size < 1:
         raise ValueError("memif_ring_size must be positive")
     click.echo(
-        "=== Подготовка сети "
+        "=== Setup VPP "
         f"(nat-mode={mode}, n_workers={n_workers}, memif_ring_size={memif_ring_size}) ==="
     )
 
-    disable_failover_startup_topology()
     configure_vpp_nat_plugins_for_mode(mode)
     configure_vpp_workers(n_workers)
     restart_vpp_service()
@@ -586,4 +571,4 @@ def setup_network(
     set_interfaces_up()
     configure_nat_runtime_mode(mode, n_workers)
 
-    click.echo("✓ Сетевая топология готова")
+    click.echo("✓ VPP готов: runtime-топология и NAT-режим применены")

@@ -4,6 +4,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -26,7 +27,6 @@ from manage_nat.network.setup import (
 )
 
 TREX_CFG_PATH = PROJECT_ROOT / "configs" / "trex" / "trex_cfg.yaml"
-TREX_FAILOVER_CFG_PATH = PROJECT_ROOT / "configs" / "trex" / "failover" / "trex_cfg.yaml"
 TREX_PID_PATH = PROJECT_ROOT / "configs" / "trex" / "trex.pid"
 TREX_LOG_PATH = PROJECT_ROOT / "configs" / "trex" / "trex.log"
 TREX_RPC_HOST = "127.0.0.1"
@@ -43,7 +43,6 @@ TREX_MEMORY_PER_PAIR_MB = 1024
 TREX_MEMORY_MIN_MB = 2048
 TREX_MEMORY_MAX_WORKERS_TARGET = 10
 TREX_MBUF_FACTOR = "0.2"
-TREX_FAILOVER_INTERFACE_WAIT_SECONDS = 10
 
 TREX_DATA_CORES_PER_PAIR = 1
 
@@ -170,7 +169,7 @@ def ensure_memif_sockets_exist() -> None:
         rendered = ", ".join(missing)
         raise RuntimeError(
             "TRex memif sockets are missing. "
-            f"Run `manage-nat network setup <mode>` first. Missing: {rendered}"
+            f"Run `manage-nat setup-vpp <mode>` first. Missing: {rendered}"
         )
 
 
@@ -248,6 +247,32 @@ def process_is_running(pid: int) -> bool:
     return True
 
 
+def privileged_command(command: list[str]) -> list[str]:
+    """Возвращает root-команду без интерактивного sudo prompt в background-процессах."""
+    if os.geteuid() == 0:
+        return command
+    return ["sudo", "-n", *command]
+
+
+def ensure_sudo_ready() -> None:
+    """Проверяет sudo до запуска TRex, чтобы prompt не улетел в trex.log."""
+    if os.geteuid() == 0:
+        return
+    command = ["sudo", "-v"] if sys.stdin.isatty() else ["sudo", "-n", "true"]
+    result = subprocess.run(
+        command,
+        capture_output=not sys.stdin.isatty(),
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "TRex requires sudo/root privileges. "
+            "Run `sudo -v` in a terminal first, then retry `manage-nat setup-trex`, "
+            "or run the command as root."
+        )
+
+
 def stop_existing_trex_server(config_paths: Iterable[Path] | None = None) -> None:
     """Останавливает ранее запущенный через setup TRex server."""
     paths = tuple(config_paths or (TREX_CFG_PATH,))
@@ -265,8 +290,9 @@ def stop_existing_trex_server(config_paths: Iterable[Path] | None = None) -> Non
 
     rendered_pids = ", ".join(str(pid) for pid in sorted(live_pids))
     click.echo(f"  Останавливаю старый TRex server (pid={rendered_pids})")
+    ensure_sudo_ready()
     for pid in sorted(live_pids):
-        subprocess.run(["sudo", "kill", str(pid)], check=False)
+        subprocess.run(privileged_command(["kill", str(pid)]), check=False)
 
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -277,7 +303,7 @@ def stop_existing_trex_server(config_paths: Iterable[Path] | None = None) -> Non
 
     for pid in sorted(live_pids):
         if process_is_running(pid):
-            subprocess.run(["sudo", "kill", "-9", str(pid)], check=False)
+            subprocess.run(privileged_command(["kill", "-9", str(pid)]), check=False)
     TREX_PID_PATH.unlink(missing_ok=True)
 
 
@@ -302,18 +328,25 @@ def wait_for_trex_rpc_ready(process: subprocess.Popen[bytes]) -> None:
     )
 
 
+def trex_rpc_is_ready() -> bool:
+    """Проверяет, что уже запущенный TRex server отвечает по RPC."""
+    try:
+        with socket.create_connection((TREX_RPC_HOST, TREX_RPC_PORT), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
 def launch_trex_server_process(
     trex_binary: Path,
     config_path: Path,
     data_cores: int | None = None,
-    interface_wait_sec: int | None = None,
 ) -> subprocess.Popen[bytes]:
     """Запускает TRex server process без ожидания RPC-ready."""
     TREX_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     trex_workdir = trex_binary.parent
     trex_data_cores = resolve_trex_data_cores(requested_cores=data_cores)
-    command = [
-        "sudo",
+    command = privileged_command([
         str(trex_binary),
         "-i",
         "-c",
@@ -322,11 +355,9 @@ def launch_trex_server_process(
         str(config_path.resolve()),
         "--mbuf-factor",
         TREX_MBUF_FACTOR,
-    ]
-    if interface_wait_sec is not None:
-        command.extend(["-w", str(interface_wait_sec)])
+    ])
 
-    log_file = TREX_LOG_PATH.open("ab")
+    log_file = TREX_LOG_PATH.open("wb")
     process = subprocess.Popen(
         command,
         cwd=str(trex_workdir),
@@ -373,8 +404,9 @@ def setup_trex_server(config_path: Path = TREX_CFG_PATH) -> None:
     trex_data_cores = resolve_trex_data_cores()
     trex_binary = resolve_trex_server_binary()
     ensure_memif_sockets_exist()
+    ensure_sudo_ready()
     write_trex_config(config_path)
-    stop_existing_trex_server(config_paths=(TREX_CFG_PATH, TREX_FAILOVER_CFG_PATH))
+    stop_existing_trex_server(config_paths=(TREX_CFG_PATH,))
     trex_pid = start_trex_server(trex_binary=trex_binary, config_path=config_path, data_cores=trex_data_cores)
     configure_vpp_memif_rx_placement()
 
@@ -387,31 +419,9 @@ def setup_trex_server(config_path: Path = TREX_CFG_PATH) -> None:
         click.echo(f"  - port {port.port_id}: {port.name} -> {port.socket_path}")
 
 
-def launch_trex_failover_server(config_path: Path) -> subprocess.Popen[bytes]:
-    """Запускает TRex failover server без ожидания link/RPC, чтобы VPP успел подключиться."""
-    click.echo("=== Деплой TRex failover server ===")
-    trex_binary = resolve_trex_server_binary()
-    if not config_path.exists():
-        raise FileNotFoundError(f"TRex failover config not found: {config_path}")
-    stop_existing_trex_server(config_paths=(TREX_CFG_PATH, config_path))
-    process = launch_trex_server_process(
-        trex_binary=trex_binary,
-        config_path=config_path,
-        data_cores=1,
-        interface_wait_sec=TREX_FAILOVER_INTERFACE_WAIT_SECONDS,
-    )
-    TREX_PID_PATH.write_text(f"{process.pid}\n", encoding="utf-8")
-
-    click.echo(f"  ✓ Конфиг TRex failover: {config_path}")
-    click.echo(f"  ✓ TRex binary: {trex_binary}")
-    click.echo("  ✓ TRex dataplane cores per port pair: 1")
-    click.echo(f"  ✓ TRex interface wait: {TREX_FAILOVER_INTERFACE_WAIT_SECONDS}s")
-    click.echo(f"  ✓ TRex server запускается: pid={process.pid}, rpc={TREX_RPC_HOST}:{TREX_RPC_PORT}")
-    click.echo(f"  ✓ TRex log: {TREX_LOG_PATH}")
-    return process
-
-
-def wait_for_launched_trex_server(process: subprocess.Popen[bytes]) -> None:
-    """Ждет RPC-ready для уже запущенного TRex process."""
-    wait_for_trex_rpc_ready(process)
-    click.echo(f"  ✓ TRex server готов: pid={process.pid}, rpc={TREX_RPC_HOST}:{TREX_RPC_PORT}")
+def ensure_trex_server_for_test() -> None:
+    """Использует уже поднятый TRex server или поднимает новый, если RPC недоступен."""
+    if trex_rpc_is_ready():
+        click.echo(f"=== Использую запущенный TRex server ({TREX_RPC_HOST}:{TREX_RPC_PORT}) ===")
+        return
+    setup_trex_server()

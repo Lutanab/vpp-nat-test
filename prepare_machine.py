@@ -402,7 +402,7 @@ def ensure_vpp_package() -> None:
 def ensure_vpp_none_mode() -> None:
     """Идемпотентно поднимает VPP-топологию без NAT."""
     print("Поднимаю VPP без NAT...", flush=True)
-    run(["uv", "run", "manage-nat", "network", "setup", "none", "--n-workers", VPP_WORKERS])
+    run(["uv", "run", "manage-nat", "setup-vpp", "none", "--n-workers", VPP_WORKERS])
 
 
 ########

@@ -1,14 +1,15 @@
 ## Управление проектом
 
-Проект использует CLI `manage-nat` для управления NAT-режимом и сетевой топологией.
+Проект использует CLI `manage-nat` для управления VPP/TRex стендом и NAT-режимом.
 
 ### Доступные команды `manage-nat`:
 
 - `prepare` - Подготовка окружения (зависимости VPP и системные пакеты).
-- `network setup <none|nat44|nat_fo>` - Подготовка runtime-сети VPP и применение NAT-режима.
-- `network clean` - Очистка runtime-сетевой топологии.
-- `show` - Показать NAT-режим из managed-блока `/etc/vpp/startup.conf`.
-- `switch <none|nat44|nat_fo>` - Полный сценарий переключения NAT-режима.
+- `setup-vpp <none|nat44|nat_fo>` - Поднять VPP в нужном NAT-режиме и с нужным числом workers.
+- `teardown-vpp` - Остановить VPP и очистить runtime-топологию.
+- `setup-trex [vpp]` - Поднять TRex server, подключенный memif-интерфейсами к VPP.
+- `teardown-trex` - Остановить TRex server.
+- `show` - Показать состояние VPP/TRex стенда.
 
 ### Примеры использования:
 
@@ -16,14 +17,21 @@
 # 1. Подготовка окружения (один раз при установке)
 manage-nat prepare
 
-# 2. Подготовка сетевой топологии VPP (обязательно указать NAT режим)
-manage-nat network setup none
+# 2. Подготовка VPP (обязательно указать NAT режим)
+manage-nat setup-vpp none
 # или:
-manage-nat network setup nat44
-manage-nat network setup nat_fo
+manage-nat setup-vpp nat44
+manage-nat setup-vpp nat_fo
 
-# 3. Очистка сетевой конфигурации
-manage-nat network clean
+# 3. Подключить TRex к VPP memif-топологии
+manage-nat setup-trex
+
+# 4. Показать состояние стенда
+manage-nat show
+
+# 5. Остановить runtime-компоненты
+manage-nat teardown-trex
+manage-nat teardown-vpp
 
 # Справка по manage-nat
 manage-nat --help
@@ -52,12 +60,12 @@ sudo cp ./configs/startu.conf /etc/vpp/startup.conf
 sudo systemctl restart vpp
 ```
 
-## NAT режимы в `manage-nat network setup`
+## NAT режимы в `manage-nat setup-vpp`
 
 Команда принимает обязательный аргумент NAT-режима:
 
 ```bash
-manage-nat network setup <none|nat44|nat_fo> [--n_workers N] [--memif-ring-size SIZE]
+manage-nat setup-vpp <none|nat44|nat_fo> [--n_workers N] [--memif-ring-size SIZE]
 ```
 
 Поддерживаются режимы:
@@ -70,7 +78,7 @@ manage-nat network setup <none|nat44|nat_fo> [--n_workers N] [--memif-ring-size 
 - обновляет `cpu`-параметры VPP в `/etc/vpp/startup.conf` (`main-core` и `corelist-workers` через `--n_workers`);
 - перезапускает VPP;
 - поднимает фиксированную VPP-сетевую топологию из 8 memif-пар (`8` inside + `8` outside интерфейсов);
-- создает memif-интерфейсы с `ring-size` (по умолчанию `1024`, можно переопределить через `--memif-ring-size`);
+- создает memif-интерфейсы с `ring-size` (по умолчанию `16384`, можно переопределить через `--memif-ring-size`);
 - в dataplane/NAT используются только первые `N` пар (по `--n_workers N`; для `n_workers=0` используется первая пара);
 - применяет runtime-конфигурацию выбранного NAT-режима.
 
@@ -80,9 +88,9 @@ manage-nat network setup <none|nat44|nat_fo> [--n_workers N] [--memif-ring-size 
 ### `nat_fo` режим
 
 ```bash
-manage-nat network setup nat_fo
+manage-nat setup-vpp nat_fo
 # или с кастомным размером кольца:
-manage-nat network setup nat_fo --memif-ring-size 2048
+manage-nat setup-vpp nat_fo --memif-ring-size 2048
 ```
 
 Автоматически применяются команды:
@@ -138,7 +146,7 @@ sudo vppctl show plugins | grep nat_fo
 а также сколько сессий было восстановлено и сколько было отброшено как протухшие
 при последнем recovery после старта VPP.
 
-Если при `manage-nat network setup nat_fo` видно `unknown input 'nat_fo ...'`, это означает, что в системном VPP нет `nat_fo_plugin.so` (или он не загрузился после рестарта).  
+Если при `manage-nat setup-vpp nat_fo` видно `unknown input 'nat_fo ...'`, это означает, что в системном VPP нет `nat_fo_plugin.so` (или он не загрузился после рестарта).
 Проверьте и переустановите пакеты VPP из этого репозитория:
 
 ```bash
@@ -154,7 +162,7 @@ sudo vppctl show plugins | grep nat_fo
 ### `nat44` режим
 
 ```bash
-manage-nat network setup nat44
+manage-nat setup-vpp nat44
 ```
 
 Автоматически применяются команды:
@@ -172,26 +180,31 @@ sudo vppctl show nat44 interfaces
 ### `none` режим
 
 ```bash
-manage-nat network setup none
+manage-nat setup-vpp none
 ```
 
 В этом режиме NAT-плагины выключаются в managed-блоке `startup.conf`, и runtime NAT-конфигурация не применяется.
 
-### Смена NAT-режима (рекомендуемый сценарий)
+### Управление VPP/TRex runtime
 
-При переключении режима NAT лучше выполнять полный цикл пересоздания топологии:
+`setup-vpp` идемпотентен: его можно повторно запускать для нужного режима, числа workers и ring-size.
+TRex поднимается отдельной командой после VPP, чтобы явно контролировать порядок runtime-компонентов:
 
 ```bash
-# 1) Очистить сеть (остановка VPP + удаление старых интерфейсов)
-manage-nat network clean
+# Поднять или пересоздать VPP runtime
+manage-nat setup-vpp <none|nat44|nat_fo> [--n-workers N] [--memif-ring-size SIZE]
 
-# 2) Поднять сеть с нужным NAT-режимом
-manage-nat network setup <none|nat44|nat_fo> [--memif-ring-size SIZE]
+# Подключить TRex к VPP memif-сокетам
+manage-nat setup-trex
+
+# Остановить runtime
+manage-nat teardown-trex
+manage-nat teardown-vpp
 ```
 
-### Автоматическое переключение NAT через CLI
+### Workspace
 
-Сначала подготовьте workspace:
+Сначала подготовьте Python-окружение:
 
 ```bash
 uv sync
@@ -202,28 +215,6 @@ uv sync
 ```bash
 manage-nat show
 ```
-
-Переключить режим:
-
-```bash
-manage-nat switch <none|nat44|nat_fo>
-# с переопределением ring-size:
-manage-nat switch <none|nat44|nat_fo> --memif-ring-size 2048
-```
-
-Если режим уже записан в `startup.conf`, но нужно принудительно пересобрать `nat_fo`
-и пересоздать runtime-топологию:
-
-```bash
-manage-nat switch --restart nat_fo
-# или с явным ring-size:
-manage-nat switch --restart nat_fo --memif-ring-size 2048
-```
-
-CLI выполняет шаги по порядку:
-- `manage-nat network clean`
-- если выбран `nat_fo`: `cd vpp && make pkg-deb-debug`, затем `dpkg -i build-root/*.deb`
-- `manage-nat network setup <mode>`
 
 ## Мониторинг ресурсов (VPP/TRex)
 
@@ -270,7 +261,7 @@ python3 record_worker_cpu.py
 Параллельно запускается прогон:
 
 ```bash
-test-nat load-run
+test-nat load
 ```
 
 После завершения прогона остановите поллер (`Ctrl+C`) и соберите per-step таблицу:

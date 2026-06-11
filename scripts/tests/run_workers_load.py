@@ -32,9 +32,9 @@ def set_n_workers(n_workers: int) -> None:
 
 
 def run_load_test(n_workers: int) -> int:
-    print(f"\n=== test-nat run load: nat_mode={NAT_MODE}, n_workers={n_workers} ===", flush=True)
+    print(f"\n=== test-nat load: nat_mode={NAT_MODE}, n_workers={n_workers} ===", flush=True)
     set_n_workers(n_workers)
-    completed = subprocess.run([str(TEST_NAT), "run", "load"], cwd=REPO_ROOT)
+    completed = subprocess.run([str(TEST_NAT), "load"], cwd=REPO_ROOT)
     return completed.returncode
 
 

@@ -6,11 +6,10 @@ from pathlib import Path
 import rich_click as click
 
 from .config import load_test_configs
-from .failover.run import run_failover_profile, run_failover_simple
 from .load_runner import LoadSearchError, run_load_test
 from .trex.run.simple import CapturedTcpPacket, SimpleTcpTestResult, run_simple_tcp_test
 from .trex.run.udp import run_udp_test
-from .trex.setup import setup_trex_server
+from .trex.setup import ensure_trex_server_for_test
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -18,28 +17,7 @@ def app() -> None:
     """Host-side NAT benchmark orchestration."""
 
 
-@app.group("setup")
-def setup_group() -> None:
-    """Deploy benchmark runtime components."""
-
-
-@setup_group.command("trex")
-def setup_trex_command() -> None:
-    """Deploy TRex server for the current VPP memif topology."""
-    setup_trex_server()
-
-
-@app.group("trex")
-def trex_group() -> None:
-    """Run TRex-based benchmark workflows."""
-
-
-@trex_group.group("run")
-def trex_run_group() -> None:
-    """Run TRex traffic tests."""
-
-
-@trex_run_group.command("udp")
+@app.command("udp")
 @click.option(
     "--target-pps",
     type=int,
@@ -78,19 +56,14 @@ def trex_run_udp_command(target_pps: int, duration: float, flow_count: int, warm
     click.echo(f"{loss_percent:.6f}")
 
 
-@app.group("run")
-def run_group() -> None:
-    """Run functional checks from the host."""
-
-
-@run_group.command("simple")
+@app.command("simple")
 def run_simple_command() -> None:
     """Run a minimal TCP NAT correctness check."""
-    setup_trex_server()
+    ensure_trex_server_for_test()
     print_simple_tcp_result(run_simple_tcp_test())
 
 
-@run_group.command("load")
+@app.command("load")
 @click.option(
     "--load-config",
     "--config",
@@ -117,23 +90,6 @@ def run_load_command(
         )
     except LoadSearchError as exc:
         raise click.ClickException(str(exc)) from exc
-
-
-@run_group.group("failover")
-def run_failover_group() -> None:
-    """Run VPP restart failover checks."""
-
-
-@run_failover_group.command("simple")
-def run_failover_simple_command() -> None:
-    """Prepare and run the simple UDP failover scenario."""
-    run_failover_simple()
-
-
-@run_failover_group.command("profile")
-def run_failover_profile_command() -> None:
-    """Run the profile failover scenario."""
-    run_failover_profile()
 
 
 def print_simple_tcp_result(result: SimpleTcpTestResult) -> None:

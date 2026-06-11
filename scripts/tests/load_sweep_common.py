@@ -59,7 +59,7 @@ def set_yaml_scalar(content: str, key: str, value: str | int) -> str:
 
 def run_load_test(case: LoadCase, load_config_path: Path) -> int:
     print(
-        "\n=== test-nat run load: "
+        "\n=== test-nat load: "
         f"test_name={case.test_name}, "
         f"nat_mode={case.nat_mode}, "
         f"n_workers={case.n_workers}, "
@@ -68,7 +68,7 @@ def run_load_test(case: LoadCase, load_config_path: Path) -> int:
         flush=True,
     )
     write_load_config(load_config_path, case)
-    completed = subprocess.run([str(TEST_NAT), "run", "load"], cwd=REPO_ROOT)
+    completed = subprocess.run([str(TEST_NAT), "load"], cwd=REPO_ROOT)
     return completed.returncode
 
 

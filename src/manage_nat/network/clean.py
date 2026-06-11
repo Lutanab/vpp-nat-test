@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
 import rich_click as click
 
@@ -63,17 +62,16 @@ def delete_interfaces(interfaces: list[str]) -> None:
         click.echo(f"  ✓ Удалён интерфейс {iface}")
 
 
-def clean_network(project_root: Path) -> None:
+def clean_network() -> None:
     """Очищает runtime-сетевую топологию (VPP + интерфейсы хоста)."""
-    del project_root  # API-совместимость с другими workflow-функциями.
-    click.echo("=== Очистка сетевой топологии ===")
+    click.echo("=== Teardown VPP runtime ===")
     stop_vpp_service_if_running()
 
     interfaces = list_prefixed_interfaces()
     if not interfaces:
         click.echo("  Интерфейсы с целевыми префиксами не найдены")
-        click.echo("✓ Очистка завершена")
+        click.echo("✓ VPP runtime остановлен")
         return
 
     delete_interfaces(interfaces)
-    click.echo("✓ Очистка завершена")
+    click.echo("✓ VPP runtime остановлен")

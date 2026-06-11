@@ -32,7 +32,7 @@ python3 run_worker_scalability_tests.py
 1. Идемпотентно настраивает конфиги тестирования.
 2. Для `n_workers` от 1 до 5:
    - записывает текущее значение `n_workers` в `configs/loadtest/load/test_config.yaml`;
-   - запускает `uv run test-nat run load`.
+   - запускает `uv run test-nat load`.
 3. После всех прогонов строит график
 
 ## Методология определения max PPS
